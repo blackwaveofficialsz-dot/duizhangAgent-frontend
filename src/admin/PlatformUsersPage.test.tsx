@@ -68,4 +68,16 @@ describe('PlatformUsersPage', () => {
 
     expect(screen.queryByRole('button', { name: '重置密码' })).toBeNull();
   });
+
+  it('shows users without a tenant as personal accounts', async () => {
+    vi.mocked(listPlatformUsers).mockResolvedValue({
+      users: [{ ...user, id: 'personal-user', username: 'personal-user', tenant_id: null, role: 'personal' }],
+      total: 1,
+    });
+
+    render(<PlatformUsersPage />);
+
+    expect(await screen.findByText('个人空间')).toBeTruthy();
+    expect(screen.getByText('个人用户')).toBeTruthy();
+  });
 });

@@ -50,8 +50,8 @@ export function AdminDashboard() {
           // 规则缺失等重算错误不能阻断旧汇总的展示。
         }
       }
-      const [healthData, summaryData, dailyData, tenantData, userData, failedTaskData, runningTaskData] = await Promise.all([
-        getPlatformHealth().catch(() => null),
+      const [healthResult, summaryResult, dailyResult, tenantResult, userResult, failedTaskResult, runningTaskResult] = await Promise.allSettled([
+        getPlatformHealth(),
         listSummaries({ period: targetPeriod, limit: 500 }),
         listDaily(targetPeriod),
         listPlatformTenants({ limit: 1 }),
@@ -59,15 +59,21 @@ export function AdminDashboard() {
         listPlatformTasks({ status: 'failed', limit: 5 }),
         listPlatformTasks({ status: 'running', limit: 1 }),
       ]);
-      setHealth(healthData);
-      setSummaries(summaryData);
-      setDaily(dailyData);
-      setSystemStats({
-        tenants: tenantData.total,
-        users: userData.total,
-        failedTasks: failedTaskData.total,
-        runningTasks: runningTaskData.total,
-      });
+      setHealth(healthResult.status === 'fulfilled' ? healthResult.value : null);
+      setSummaries(summaryResult.status === 'fulfilled' ? summaryResult.value : []);
+      setDaily(dailyResult.status === 'fulfilled' ? dailyResult.value : []);
+      setSystemStats((previous) => ({
+        tenants: tenantResult.status === 'fulfilled' ? tenantResult.value.total : previous.tenants,
+        users: userResult.status === 'fulfilled' ? userResult.value.total : previous.users,
+        failedTasks: failedTaskResult.status === 'fulfilled' ? failedTaskResult.value.total : previous.failedTasks,
+        runningTasks: runningTaskResult.status === 'fulfilled' ? runningTaskResult.value.total : previous.runningTasks,
+      }));
+
+      const failedRequest = [summaryResult, dailyResult, tenantResult, userResult, failedTaskResult, runningTaskResult]
+        .find((result) => result.status === 'rejected');
+      if (failedRequest?.status === 'rejected') {
+        setError(failedRequest.reason instanceof Error ? failedRequest.reason.message : '部分数据加载失败');
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '加载失败');
     } finally {
@@ -118,7 +124,8 @@ export function AdminDashboard() {
     { title: '金额（元）', dataIndex: 'amount_yuan', key: 'amount_yuan', align: 'right', width: 120, render: (value) => <span className="font-semibold text-slate-900">¥{fmtYuan(String(value))}</span> },
   ];
 
-  const healthLabel = health === null ? '健康检查不可用' : health.status === 'ok' ? '正常' : '降级';
+  const healthReady = health?.status === 'ok' || health?.status === 'ready';
+  const healthLabel = health === null ? '健康检查不可用' : healthReady ? '正常' : '降级';
   const healthHint = health === null
     ? '未影响其他监控数据'
     : Object.entries(health.services).map(([name, status]) => `${name}: ${status}`).join(' · ');
@@ -141,7 +148,7 @@ export function AdminDashboard() {
       />
       {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
       <PlatformMetricStrip items={[
-        { label: '系统健康', value: healthLabel, tone: health === null ? 'warning' : health.status === 'ok' ? 'success' : 'error', hint: healthHint },
+        { label: '系统健康', value: healthLabel, tone: health === null ? 'warning' : healthReady ? 'success' : 'error', hint: healthHint },
         { label: '失败任务', value: systemStats.failedTasks, tone: systemStats.failedTasks ? 'error' : 'success' },
         { label: '运行任务', value: systemStats.runningTasks, tone: systemStats.runningTasks ? 'info' : 'neutral' },
         { label: '用户数', value: systemStats.users, hint: `管理 ${systemStats.tenants} 个租户` },

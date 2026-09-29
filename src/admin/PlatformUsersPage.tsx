@@ -166,14 +166,19 @@ export function PlatformUsersPage() {
       dataIndex: 'tenant_id',
       key: 'tenant_id',
       width: 220,
-      render: (value) => <span className="text-slate-600">{tenantNameMap[String(value)] ?? String(value)}</span>,
+      render: (value) => <span className="text-slate-600">{value ? tenantNameMap[String(value)] ?? String(value) : '个人空间'}</span>,
     },
     {
       title: '角色',
       dataIndex: 'role',
       key: 'role',
       width: 112,
-      render: (value) => <PlatformStatusTag label={value === 'admin' ? '管理员' : '成员'} tone={value === 'admin' ? 'info' : 'neutral'} />,
+      render: (value) => (
+        <PlatformStatusTag
+          label={value === 'admin' ? '管理员' : value === 'personal' ? '个人用户' : '成员'}
+          tone={value === 'admin' ? 'info' : 'neutral'}
+        />
+      ),
     },
     {
       title: '创建时间',
@@ -206,7 +211,7 @@ export function PlatformUsersPage() {
     <div className="space-y-4">
       <PlatformPageHeader
         title="用户管理"
-        description="管理平台租户下的用户账号与访问角色。"
+        description="管理全平台用户账号与访问角色。"
         primaryAction={<Button type="primary" icon={<PlusOutlined aria-hidden />} onClick={openCreate}>新建用户</Button>}
       />
       <PlatformFilterBar resultCount={total}>
@@ -244,6 +249,7 @@ export function PlatformUsersPage() {
           options={[
             { value: 'member', label: '成员' },
             { value: 'admin', label: '管理员' },
+            { value: 'personal', label: '个人用户' },
           ]}
           className="w-32"
         />
@@ -283,20 +289,24 @@ export function PlatformUsersPage() {
           <div className="space-y-5">
             <dl className="grid grid-cols-2 gap-4 text-sm">
               <div><dt className="text-slate-500">用户名</dt><dd className="mt-1 font-medium text-slate-800">{editingUser.username}</dd></div>
-              <div><dt className="text-slate-500">所属租户</dt><dd className="mt-1 font-medium text-slate-800">{tenantNameMap[editingUser.tenant_id] ?? editingUser.tenant_id}</dd></div>
+              <div><dt className="text-slate-500">所属租户</dt><dd className="mt-1 font-medium text-slate-800">{editingUser.tenant_id ? tenantNameMap[editingUser.tenant_id] ?? editingUser.tenant_id : '个人空间'}</dd></div>
               <div><dt className="text-slate-500">创建时间</dt><dd className="mt-1 text-slate-800">{editingUser.created_at ? formatBeijingTime(editingUser.created_at) : '-'}</dd></div>
             </dl>
             <label className="block space-y-1.5 text-sm text-slate-700">
               <span>角色</span>
-              <Select<UserDraft['role']>
-                value={editingUser.role as UserDraft['role']}
-                onChange={handleRoleChange}
-                options={[
-                  { value: 'member', label: '成员' },
-                  { value: 'admin', label: '管理员' },
-                ]}
-                className="w-full"
-              />
+              {editingUser.role === 'personal' ? (
+                <div><PlatformStatusTag label="个人用户" tone="neutral" /></div>
+              ) : (
+                <Select<UserDraft['role']>
+                  value={editingUser.role as UserDraft['role']}
+                  onChange={handleRoleChange}
+                  options={[
+                    { value: 'member', label: '成员' },
+                    { value: 'admin', label: '管理员' },
+                  ]}
+                  className="w-full"
+                />
+              )}
             </label>
             <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
               <Button danger icon={<DeleteOutlined aria-hidden />} onClick={() => removeUser(editingUser.id)}>删除用户</Button>

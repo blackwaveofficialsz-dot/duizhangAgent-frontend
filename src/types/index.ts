@@ -420,7 +420,7 @@ export interface ExtractedFact {
 export interface AdminUser {
   id: string;
   username: string;
-  tenant_id: string;
+  tenant_id: string | null;
   role: string;
   must_change_password: boolean;
   created_at: string;

@@ -56,4 +56,36 @@ describe('AdminDashboard', () => {
     });
     expect(screen.queryByRole('alert')).toBeNull();
   });
+
+  it('keeps successful usage data when one metric request fails', async () => {
+    vi.mocked(listSummaries).mockResolvedValue([{
+      id: 'summary-1',
+      tenant_id: 'tenant-1',
+      period: '2026-09',
+      cache_read_tokens: 1,
+      cache_write_tokens: 2,
+      cache_miss_tokens: 3,
+      output_tokens: 4,
+      amount_yuan: '64.0778',
+      computed_at: '2026-09-29T11:00:00+08:00',
+    }]);
+    vi.mocked(listPlatformUsers).mockRejectedValue(new Error('用户统计加载失败'));
+
+    render(<AdminDashboard />);
+
+    expect((await screen.findByRole('alert')).textContent).toContain('用户统计加载失败');
+    expect(screen.getByRole('region', { name: '关键指标' }).textContent).toContain('本期金额¥64.0778');
+    expect(screen.getByText('tenant-1')).toBeTruthy();
+  });
+
+  it('shows the readiness endpoint as healthy', async () => {
+    vi.mocked(getPlatformHealth).mockResolvedValue({
+      status: 'ready',
+      services: { database: 'ok', redis: 'ok' },
+    });
+
+    render(<AdminDashboard />);
+
+    expect(await screen.findByText('正常')).toBeTruthy();
+  });
 });

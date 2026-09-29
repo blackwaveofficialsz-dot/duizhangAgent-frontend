@@ -81,7 +81,7 @@ export interface PlatformHealth {
 }
 
 export async function getPlatformHealth(): Promise<PlatformHealth> {
-  const res = await platformFetch('/health');
+  const res = await platformFetch('/health/ready');
   return res.json();
 }
 
