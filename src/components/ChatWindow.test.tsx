@@ -219,6 +219,65 @@ describe('ChatWindow streaming performance', () => {
     expect(screen.queryByRole('group', { name: '对话模式' })).toBeNull();
   });
 
+  it('keeps keyboard focus when the first send moves the composer to the bottom', async () => {
+    useChatStore.setState({ sessions: [{
+      id: 'session-1', title: '新对话', createdAt: 0, conversationMode: 'agui', messages: [],
+    }] });
+    componentMocks.sendMessage.mockImplementationOnce(async (text: string) => {
+      const store = useChatStore.getState();
+      store.addMessage('session-1', { ...userMessage, content: text });
+      store.addMessage('session-1', { ...assistantMessage, streaming: false, taskId: undefined });
+      return true;
+    });
+    render(<ChatWindow />);
+    const input = screen.getByRole('textbox', { name: '对话输入' });
+    act(() => { input.focus(); });
+    fireEvent.change(input, { target: { value: '第一个问题' } });
+
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+
+    const nextInput = screen.getByRole('textbox', { name: '对话输入' });
+    expect(document.activeElement).toBe(nextInput);
+    fireEvent.change(nextInput, { target: { value: '第二个问题' } });
+    expect(nextInput).toHaveProperty('value', '第二个问题');
+    expect(screen.getByRole('button', { name: '发送消息' })).toHaveProperty('disabled', false);
+  });
+
+  it('restores composer focus after clicking send so the next question can be typed', async () => {
+    let finishSend!: () => void;
+    componentMocks.sendMessage.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      finishSend = () => resolve(true);
+    }));
+    render(<ChatWindow />);
+    const input = screen.getByRole('textbox', { name: '对话输入' });
+    fireEvent.change(input, { target: { value: '第二个问题' } });
+    const send = screen.getByRole('button', { name: '发送消息' });
+    act(() => { send.focus(); });
+    await act(async () => { fireEvent.click(send); });
+    expect(send).toHaveProperty('disabled', true);
+
+    await act(async () => { finishSend(); });
+
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: '第三个问题' } });
+    expect(input).toHaveProperty('value', '第三个问题');
+    expect(send).toHaveProperty('disabled', false);
+  });
+
+  it('focuses the composer when switching to another existing conversation', () => {
+    useChatStore.setState((state) => ({ sessions: [...state.sessions, {
+      id: 'session-2', title: '另一会话', createdAt: 3, messages: [
+        { ...userMessage, id: 'user-2' }, { ...assistantMessage, id: 'assistant-2', streaming: false },
+      ],
+    }] }));
+    render(<ChatWindow />);
+    act(() => { screen.getByRole('textbox', { name: '对话输入' }).blur(); });
+
+    act(() => { useChatStore.setState({ activeSessionId: 'session-2' }); });
+
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: '对话输入' }));
+  });
+
   it('keeps active AG-UI progress compact and exposes stop as a secondary action', async () => {
     act(() => { useChatStore.setState({ sessions: [{
       id: 'session-1', title: '分析会话', createdAt: 0, conversationMode: 'agui', messages: [userMessage, {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import { ArrowDownOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Button, Input, notification } from 'antd';
 import type { AgentRunApprovalDecision } from '../api/agentRuns';
@@ -57,6 +57,7 @@ export function ChatWindow() {
   const workspaceType = useAuthStore((state) => state.workspaceType);
   const isPersonal = workspaceType === 'personal';
   const [input, setInput] = useState('');
+  const composerRef = useRef<ComponentRef<typeof TextArea>>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
@@ -132,6 +133,10 @@ export function ChatWindow() {
   const isGenerating = Boolean(lastMessage?.streaming
     || lastMessage?.agui?.status === 'connecting'
     || lastMessage?.agui?.status === 'running');
+
+  useEffect(() => {
+    if (activeSessionId && !sending) composerRef.current?.focus({ preventScroll: true });
+  }, [activeSessionId, sending]);
 
   useEffect(() => {
     if (activeSessionId && !isPersonal) {
@@ -306,8 +311,10 @@ export function ChatWindow() {
         </Button>}
 
         <TextArea
+          ref={composerRef}
           value={input}
           aria-label="对话输入"
+          autoFocus={!isCenter}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={isCenter ? (isPersonal ? '咨询餐饮经营问题' : '向对账 Agent 提问') : '输入消息'}
