@@ -1,3 +1,4 @@
+import { currentBeijingDate } from '../utils/time';
 /** AnalyticsPage 冒烟测试：订单视图加载 + 设置确认映射。 */
 
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -622,10 +623,8 @@ describe('AnalyticsPage', () => {
     expect(screen.queryByRole('button', { name: '检测' })).toBeNull();
   });
 
-  it('订单统计日统计默认查询昨天', async () => {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    const expected = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  it('订单统计日统计默认查询北京时间今天', async () => {
+    const expected = currentBeijingDate();
 
     render(<AnalyticsPage />);
     fireEvent.click(screen.getByText('订单统计'));
@@ -644,7 +643,7 @@ describe('AnalyticsPage', () => {
     });
   });
 
-  it('订单统计周周期查询上一完整周并传递完整参数', async () => {
+  it('订单统计周月周期包含今日并传递完整参数', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-07-20T12:00:00+08:00'));
     try {
@@ -655,16 +654,16 @@ describe('AnalyticsPage', () => {
 
       await selectAntdOption('订单统计周期', '周');
       expect(screen.getByLabelText('选择周')).toBeTruthy();
-      expect(screen.getByText('2026-W29（07/13 - 07/19）')).toBeTruthy();
-      expect(screen.getByText('本周范围：2026-07-13 至 2026-07-19')).toBeTruthy();
+      expect(screen.getByText('2026-W30（07/20 - 07/26）')).toBeTruthy();
+      expect(screen.getByText('本周范围：2026-07-20 至 2026-07-26')).toBeTruthy();
       await waitFor(() => {
-        expect(hasOperationsOverviewCall({ granularity: 'week', dateFrom: '2026-07-13', dateTo: '2026-07-19' })).toBe(true);
+        expect(hasOperationsOverviewCall({ granularity: 'week', dateFrom: '2026-07-20', dateTo: '2026-07-20' })).toBe(true);
       });
 
       await selectAntdOption('订单统计周期', '月');
       expect(screen.getByLabelText('选择月份')).toBeTruthy();
       await waitFor(() => {
-        expect(hasOperationsOverviewCall({ granularity: 'month', dateFrom: '2026-07-01', dateTo: '2026-07-19' })).toBe(true);
+        expect(hasOperationsOverviewCall({ granularity: 'month', dateFrom: '2026-07-01', dateTo: '2026-07-20' })).toBe(true);
       });
     } finally {
       vi.useRealTimers();
@@ -681,16 +680,16 @@ describe('AnalyticsPage', () => {
 
       fireEvent.click(screen.getAllByText('◀')[0]);
       await waitFor(() => {
-        expect(hasOperationsOverviewCall({ granularity: 'day', dateFrom: '2026-07-18', dateTo: '2026-07-18' })).toBe(true);
+        expect(hasOperationsOverviewCall({ granularity: 'day', dateFrom: '2026-07-19', dateTo: '2026-07-19' })).toBe(true);
       });
-      expect((screen.getByLabelText('选择日期') as HTMLInputElement).value).toBe('2026-07-18');
+      expect((screen.getByLabelText('选择日期') as HTMLInputElement).value).toBe('2026-07-19');
 
       await selectAntdOption('订单统计周期', '周');
       fireEvent.click(screen.getAllByText('◀')[0]);
       await waitFor(() => {
-        expect(hasOperationsOverviewCall({ granularity: 'week', dateFrom: '2026-07-06', dateTo: '2026-07-12' })).toBe(true);
+        expect(hasOperationsOverviewCall({ granularity: 'week', dateFrom: '2026-07-13', dateTo: '2026-07-19' })).toBe(true);
       });
-      expect((screen.getByLabelText('选择周') as HTMLInputElement).value).toBe('2026-W28');
+      expect((screen.getByLabelText('选择周') as HTMLInputElement).value).toBe('2026-W29');
 
       await selectAntdOption('订单统计周期', '月');
       fireEvent.click(screen.getAllByText('◀')[0]);
@@ -743,14 +742,14 @@ describe('AnalyticsPage', () => {
     expect(screen.getAllByText('新周期').length).toBeGreaterThan(0);
   });
 
-  it('订单统计右箭头进入今天或未来时拦截且不请求', async () => {
+  it('订单统计右箭头进入未来时拦截且不请求', async () => {
     render(<AnalyticsPage />);
     fireEvent.click(screen.getByText('订单统计'));
     await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getAllByText('▶')[0]);
 
-    await waitFor(() => expect(screen.getByText('当前只能查看截至昨日的数据，无法查看后续日期。')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('当前只能查看截至今日的数据，无法查看后续日期。')).toBeTruthy());
     expect(operationsApi.fetchOperationsOverview).toHaveBeenCalledTimes(1);
   });
 

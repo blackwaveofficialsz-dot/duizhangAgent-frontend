@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Checkbox, ConfigProvider, DatePicker, Segmented } from 'antd';
 import { Button as MobileButton, Popup } from 'antd-mobile';
 import zhCN from 'antd/locale/zh_CN';
@@ -16,6 +16,7 @@ type Props = {
   onIncludeCurrentChange: (value: boolean) => void;
   fullscreen?: boolean;
   todayYmd?: string;
+  allowToday?: boolean;
 };
 
 const granularityOptions = [
@@ -40,19 +41,21 @@ export function TrendPeriodControls({
   onIncludeCurrentChange,
   fullscreen = false,
   todayYmd = beijingTodayYmd(),
+  allowToday = false,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const pickerValue = useMemo<[Dayjs, Dayjs]>(() => [dayjs(dateFrom), dayjs(dateTo)], [dateFrom, dateTo]);
   const [mobileDraft, setMobileDraft] = useState<[string, string]>([dateFrom, dateTo]);
   const applyRange = (from: string | Dayjs, to: string | Dayjs) => {
     const [nextFrom, nextTo] = normalizeTrendRange(
-      granularity, from, to, includeCurrent, todayYmd,
+      granularity, from, to, includeCurrent, todayYmd, allowToday,
     );
     onRangeChange(nextFrom, nextTo);
   };
   const disabledDate = (current: Dayjs) => {
     const selected = current.format('YYYY-MM-DD');
     const [allowedFrom, allowedTo] = normalizeTrendRange(
-      granularity, current, current, includeCurrent, todayYmd,
+      granularity, current, current, includeCurrent, todayYmd, allowToday,
     );
     return selected < allowedFrom || selected > allowedTo;
   };
@@ -92,12 +95,13 @@ export function TrendPeriodControls({
                   { dateFrom, dateTo },
                   event.target.checked,
                   todayYmd,
+                  allowToday,
                 );
                 onIncludeCurrentChange(next.includeCurrent);
                 onRangeChange(next.dateFrom, next.dateTo);
               }}
             >
-              含当前{granularity === 'week' ? '周' : '月'}（截至昨日）
+              含当前{granularity === 'week' ? '周' : '月'}（截至{allowToday ? '今日' : '昨日'}）
             </Checkbox>
           ) : null}
         </div>
@@ -107,9 +111,8 @@ export function TrendPeriodControls({
         ) : (
           <>
             <DatePicker.RangePicker
-              key={`${granularity}:${dateFrom}:${dateTo}:${includeCurrent}`}
               aria-label="趋势日期区间"
-              defaultValue={[dayjs(dateFrom), dayjs(dateTo)]}
+              value={pickerValue}
               picker={granularity === 'day' ? 'date' : granularity}
               format="YYYY-MM-DD"
               allowClear={false}

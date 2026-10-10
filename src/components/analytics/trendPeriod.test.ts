@@ -117,3 +117,18 @@ describe('trend period', () => {
     expect(buildDetailPeriodOptions('month', '2026-08-01', '2026-07-31')).toEqual([]);
   });
 });
+
+
+describe('realtime order ranges', () => {
+  it('opts into today without changing historical consumers', () => {
+    expect(defaultTrendRange('day', '2026-10-10', true))
+      .toEqual({ dateFrom: '2026-09-30', dateTo: '2026-10-10', includeCurrent: true });
+    expect(defaultTrendRange('day', '2026-10-10').dateTo).toBe('2026-10-09');
+    expect(normalizeTrendRange('day', '2026-10-01', '2026-10-11', true, '2026-10-10', true))
+      .toEqual(['2026-10-01', '2026-10-10']);
+    expect(normalizeTrendRange('week', '2026-10-05', '2026-10-11', true, '2026-10-10', true))
+      .toEqual(['2026-10-05', '2026-10-10']);
+    expect(toggleCurrentPeriod('month', { dateFrom: '2026-09-01', dateTo: '2026-09-30' }, true, '2026-10-10', true).dateTo)
+      .toBe('2026-10-10');
+  });
+});

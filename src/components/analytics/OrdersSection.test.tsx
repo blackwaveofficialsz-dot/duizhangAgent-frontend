@@ -170,7 +170,7 @@ describe('OrdersSection timer lifecycle', () => {
 
     const activeCall = [...pollingHook.usePolling.mock.calls]
       .reverse()
-      .find(([, interval]) => interval === 5000);
+      .find(([, interval]) => interval === 30000);
     expect(activeCall).toBeDefined();
     const poll = activeCall?.[0] as (signal: AbortSignal) => Promise<void>;
     const controller = new AbortController();
@@ -299,7 +299,7 @@ describe('OrdersSection timer lifecycle', () => {
 
     expect(screen.getByText('已发现快照不完整，等待后台修复')).toBeTruthy();
     expect(screen.getByText('12%')).toBeTruthy();
-    expect(pollingHook.usePolling.mock.calls.some(([, interval]) => interval === 5000)).toBe(true);
+    expect(pollingHook.usePolling.mock.calls.some(([, interval]) => interval === 30000)).toBe(true);
   });
 
   it('uses force refresh only for the explicit refresh request', async () => {
@@ -320,4 +320,49 @@ describe('OrdersSection timer lifecycle', () => {
     expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenCalledTimes(3);
     expect(dailyFactsApi.getOrderDailyFacts.mock.calls[2][3]).toEqual(expect.objectContaining({ forceRefresh: false }));
   });
+});
+
+
+describe('live order snapshots', () => {
+  it('includes Beijing today and polls snapshots without requesting a rebuild', async () => {
+    vi.setSystemTime(new Date('2026-10-10T00:30:00+08:00'));
+    render(<OrdersSection show={vi.fn()} canManage={false} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ dateFrom: '2026-10-10', dateTo: '2026-10-10' }),
+    }));
+    const call = [...pollingHook.usePolling.mock.calls].reverse().find(([, interval]) => interval === 30000);
+    expect(call).toBeDefined();
+    operationsApi.fetchOperationsOverview.mockResolvedValueOnce(overviewResponse({ metrics: orderMetrics({ net: 75 }) }));
+    const controller = new AbortController();
+    await act(async () => { await call![0](controller.signal); });
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({
+      signal: controller.signal, refresh: false,
+    }));
+    expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenLastCalledWith('2026-10-10', '2026-10-10', {}, expect.objectContaining({
+      signal: controller.signal, forceRefresh: false,
+    }));
+    expect(analyticsApi.getOrders).not.toHaveBeenCalled();
+    expect(screen.getAllByText('¥75.00').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '昨天' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(750); });
+    expect(pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1]?.[1]).toBeNull();
+  });
+  it('keeps the last good overview when polling fails and ignores an aborted response', async () => {
+    render(<OrdersSection show={vi.fn()} canManage={false} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const poll = pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1][0];
+    operationsApi.fetchOperationsOverview.mockRejectedValueOnce(new Error('temporary outage'));
+    await act(async () => { await poll(new AbortController().signal); });
+    expect(screen.getByText(/读取暂时失败，保留上次结果/)).toBeTruthy();
+    expect(screen.getAllByText('¥50.00').length).toBeGreaterThan(0);
+    const controller = new AbortController();
+    controller.abort();
+    operationsApi.fetchOperationsOverview.mockResolvedValueOnce(overviewResponse({ metrics: orderMetrics({ net: 75 }) }));
+    await act(async () => { await poll(controller.signal); });
+    expect(screen.queryByText('¥75.00')).toBeNull();
+    expect(screen.getAllByText('¥50.00').length).toBeGreaterThan(0);
+  });
+
 });

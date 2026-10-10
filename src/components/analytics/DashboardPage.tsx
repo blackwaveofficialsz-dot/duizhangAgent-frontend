@@ -1,4 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { usePolling } from "../../hooks/usePolling";
+import { formatBeijingTime } from "../../utils/time";
 import { addMoney, sumMoney } from "../../utils/money";
 import {
   Alert as AntAlert,
@@ -1578,7 +1580,7 @@ function MealPeriodTurnoverCards({ rows }: { rows: MealPeriodTurnoverRow[] }) {
 
 export function DashboardPage({ show }: { show: (m: string) => void }) {
   const [trendRange, setTrendRange] = useState(() =>
-    defaultTrendRange("day", beijingTodayYmd()),
+    defaultTrendRange("day", beijingTodayYmd(), true),
   );
   const { dateFrom, dateTo, includeCurrent } = trendRange;
   const [granularity, setGranularity] = useState<TrendGranularity>("day");
@@ -1615,6 +1617,9 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const [selectedMealDate, setSelectedMealDate] = useState(dateTo);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [liveCheckedAt, setLiveCheckedAt] = useState<string | null>(null);
+  const [liveCheckFailed, setLiveCheckFailed] = useState(false);
+  const includesToday = dateFrom <= beijingTodayYmd() && dateTo >= beijingTodayYmd();
   const [fullscreenChart, setFullscreenChart] = useState<
     "revenue" | "meal" | null
   >(null);
@@ -1788,7 +1793,9 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     revalidate = false,
     includeRevenue = orderFactMode !== "ready",
     includeMeal = mealFactMode !== "ready",
+    pollSignal?: AbortSignal,
   ) => {
+    if (pollSignal?.aborted) return Promise.resolve(false);
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     loadAbortRef.current?.abort('ssd load');
@@ -1828,7 +1835,9 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     }
     const controller = new AbortController();
     loadAbortRef.current = controller;
-    setLoading(true);
+    const abort = () => controller.abort();
+    pollSignal?.addEventListener("abort", abort, { once: true });
+    if (!pollSignal) setLoading(true);
     const selectedStoreOptions = {
       signal: controller.signal,
       revalidate,
@@ -1840,7 +1849,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       granularity,
       includeCurrent,
     };
-    const trendRequests = trendMode === "source_compare"
+    const trendRequests = !includeRevenue ? [] : trendMode === "source_compare"
       ? [
           getRevenueTrend(dateFrom, dateTo, "ALL", "shop", revenueOptions),
           getRevenueTrend(dateFrom, dateTo, "ALL", "takeout", revenueOptions),
@@ -1869,7 +1878,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
           selectedStoreOptions,
         )
       : Promise.resolve(null);
-    Promise.allSettled([
+    return Promise.allSettled([
       trendRequest,
       mealRequest,
       mealTrendRequest,
@@ -1945,19 +1954,23 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         }
         if (includeMeal && turnoverResult.status === "fulfilled") setMealTurnover(turnoverResult.value);
 
-        [
+        const results = [
           ...(includeRevenue
             ? (trendGroupResult.status === "fulfilled" ? trendGroupResult.value : [trendGroupResult])
             : []),
           ...(includeMeal ? [mealResult, mealTrendResult, turnoverResult] : []),
-        ].forEach(result => {
+        ];
+        results.forEach(result => {
           if (result.status !== "rejected") return;
+          if (pollSignal) return;
           console.error(result.reason);
           show(result.reason instanceof Error ? result.reason.message : String(result.reason));
         });
+        return results.every(result => result.status === "fulfilled");
       })
       .finally(() => {
-        if (seq === loadSeqRef.current) {
+        pollSignal?.removeEventListener("abort", abort);
+        if (!pollSignal && seq === loadSeqRef.current) {
           setLoading(false);
         }
       });
@@ -2147,9 +2160,48 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       setFullscreenFilterExpanded(false);
     }
   }, [fullscreenChart]);
+  usePolling(
+    async signal => {
+      const detailSeq = detailLoadSeqRef.current;
+      const needsLegacy = orderFactMode !== "ready" || mealFactMode !== "ready";
+      const [orders, meals, legacy, overview] = await Promise.allSettled([
+        orderFactMode === "ready"
+          ? getOrderDailyFacts<OrderDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false })
+          : Promise.resolve(null),
+        mealFactMode === "ready"
+          ? getMealDailyFacts<MealDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false })
+          : Promise.resolve(null),
+        needsLegacy ? load(false, orderFactMode !== "ready", mealFactMode !== "ready", signal) : Promise.resolve(true),
+        selectedDetailPeriod ? fetchOperationsOverview({
+          filters: {
+            scopeKeys,
+            storeKeys: scopeKeys.includes("ALL") ? [] : shopKeys,
+            channel: "all",
+            granularity,
+            dateFrom: selectedDetailPeriod.dateFrom,
+            dateTo: selectedDetailPeriod.dateTo,
+            compare: comparisonMode,
+          },
+          signal,
+        }) : Promise.resolve(null),
+      ]);
+      if (signal.aborted || detailSeq !== detailLoadSeqRef.current) return;
+      if (orders.status === "fulfilled" && orders.value) setOrderFacts(orders.value.map(dashboardOrderFactFromRecord));
+      if (meals.status === "fulfilled" && meals.value) setMealFacts(meals.value.map(dashboardMealFactFromRecord));
+      if (overview.status === "fulfilled" && overview.value) setComparisonOverview(overview.value);
+      const failed = [orders, meals, overview, legacy].some(result => result.status === "rejected")
+        || (legacy.status === "fulfilled" && legacy.value === false);
+      setLiveCheckFailed(failed);
+      if (!failed) setLiveCheckedAt(new Date().toISOString());
+    },
+    includesToday && !loading && !detailLoading && orderFactMode !== "loading" && mealFactMode !== "loading"
+      && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 30000 : null,
+    [dateFrom, dateTo, historyDateFrom, granularity, includeCurrent, trendMode, scopeKeys.join(','), shopKeys.join(','),
+      comparisonMode, selectedDetailPeriod?.key, orderFactMode, mealFactMode, orderFactRefreshSeq, mealFactRefreshSeq],
+  );
   const handleGranularityChange = (next: TrendGranularity) => {
     setGranularity(next);
-    setTrendRange(defaultTrendRange(next, beijingTodayYmd()));
+    setTrendRange(defaultTrendRange(next, beijingTodayYmd(), true));
   };
   const handleRangeChange = (nextFrom: string, nextTo: string) => {
     setTrendRange(current => ({
@@ -2238,6 +2290,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       />
       <div className="min-w-[20rem] flex-1">
         <TrendPeriodControls
+          allowToday
           granularity={granularity}
           dateFrom={dateFrom}
           dateTo={dateTo}
@@ -2284,6 +2337,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         mobile
       />
       <TrendPeriodControls
+        allowToday
         granularity={granularity}
         dateFrom={dateFrom}
         dateTo={dateTo}
@@ -2311,6 +2365,9 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
 
   return (
     <div className="space-y-4">
+      {includesToday && <p className="text-xs text-slate-500" role="status">
+        含当日数据，每 30 秒检查最新汇总。{liveCheckFailed ? '读取暂时失败，保留上次结果并继续重试。' : liveCheckedAt ? `最近读取：${formatBeijingTime(liveCheckedAt)}` : ''}
+      </p>}
       <div className="rounded-lg border border-slate-200 bg-white p-4 md:p-5">
         <div className="md:hidden">
           <div className="mb-2 flex items-center justify-between gap-2">

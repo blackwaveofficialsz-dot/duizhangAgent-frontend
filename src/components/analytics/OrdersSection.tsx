@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, ConfigProvider, DatePicker, Input, Modal, Select, Table, type TableColumnsType } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
+import { currentBeijingDate, formatBeijingTime } from '../../utils/time';
 import { createWorkflow } from '../../api/automation';
 import { getBusinessReport, getOrders, getOrdersInsight, listPlatformDim, saveOrdersInsightCandidate, type OrderRow, type OrdersExcluded } from '../../api/analytics';
 import { getOrderDailyFacts } from '../../api/analyticsDailyFacts';
@@ -45,8 +46,8 @@ import {
   type ComparisonValueFormat,
 } from './PeriodComparison';
 import {
-  Card, FUTURE_DATE_MESSAGE, MobileDatePopup, MobileField, MobileInlineFilter, canViewPeriod,
-  displayInsightContent, inputCls, isAbortError, orderPeriodNote, parseYmd, periodIncludesToday, periodKey,
+  Card, MobileDatePopup, MobileField, MobileInlineFilter, canViewPeriod,
+  displayInsightContent, inputCls, isAbortError, orderPeriodNote, parseYmd, periodKey,
   periodDateRange, periodLabel, searchableSelectProps, shiftAnchor, ymd, yesterday, yuan,
 } from './shared';
 
@@ -257,7 +258,8 @@ function orderFactFromRecord(record: DailyFactRecord<OrderDailyFact>): OrderDail
 export function OrdersSection({ show, canManage }: { show: (m: string) => void; canManage: boolean }) {
   const isMobile = useIsMobile();
   const [gran, setGran] = useState('day');
-  const [anchor, setAnchor] = useState(yesterday);
+  const [anchor, setAnchor] = useState(() => parseYmd(currentBeijingDate()));
+  const pickerValue = useMemo(() => dayjs(anchor), [anchor]);
   const [secondaryDimension, setSecondaryDimension] = useState<OrderSecondaryDimension>('none');
   const [platformLabels, setPlatformLabels] = useState<Record<string, string>>({});
   const [detailStore, setDetailStore] = useState<{ storeKey: string; storeLabel: string } | null>(null);
@@ -269,6 +271,8 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const [rows, setRows] = useState<OrderStoreTableRow[]>([]);
   const [excluded, setExcluded] = useState<OrdersExcluded | null>(null);
   const [snapshotStatus, setSnapshotStatus] = useState<string>('missing');
+  const [liveCheckedAt, setLiveCheckedAt] = useState<string | null>(null);
+  const [liveCheckFailed, setLiveCheckFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [repairProgress, setRepairProgress] = useState(0);
@@ -283,7 +287,9 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const repairResetTimerRef = useRef<number | null>(null);
   const { fullscreenChart, fullscreenPortrait, openFullscreen, closeFullscreen } = useAnalyticsChartFullscreen<'orders-share'>();
   const period = useMemo(() => periodKey(gran, anchor), [gran, anchor]);
-  const excludeToday = useMemo(() => periodIncludesToday(gran, anchor), [gran, anchor]);
+  const excludeToday = false;
+  const includesToday = periodDateRange(gran, anchor)[0] <= currentBeijingDate()
+    && periodDateRange(gran, anchor)[1] >= currentBeijingDate();
   const dim = secondaryDimension === 'none' ? 'shop' : `shop_${secondaryDimension}`;
   const dimText = secondaryDimension === 'none'
     ? '分店铺'
@@ -292,7 +298,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const periodDescription = useMemo(() => orderPeriodNote(gran, anchor, excludeToday), [gran, anchor, excludeToday]);
   const comparisonRange = useMemo(() => {
     const [dateFrom, rawDateTo] = periodDateRange(gran, anchor);
-    const latestCompleteDate = ymd(yesterday());
+    const latestCompleteDate = currentBeijingDate();
     return [dateFrom, rawDateTo > latestCompleteDate ? latestCompleteDate : rawDateTo] as const;
   }, [gran, anchor]);
   const orderFactQueryKey = `${comparisonRange[0]}|${comparisonRange[1]}|${ordersFactRefreshSeq}`;
@@ -300,11 +306,11 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const pickerMode: 'date' | 'week' | 'month' = gran === 'week' ? 'week' : gran === 'month' ? 'month' : 'date';
   const changeGranularity = (value: string) => {
     setGran(value);
-    setAnchor(yesterday());
+    setAnchor(parseYmd(currentBeijingDate()));
   };
   const setAnchorIfAllowed = (next: Date) => {
-    if (!canViewPeriod(gran, next)) {
-      show(FUTURE_DATE_MESSAGE);
+    if (!canViewPeriod(gran, next, true)) {
+      show('当前只能查看截至今日的数据，无法查看后续日期。');
       return;
     }
     setAnchor(next);
@@ -353,8 +359,8 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   });
 
   const load = (refresh = false, backfill = false, clear = true) => {
-    if (!canViewPeriod(gran, anchor)) {
-      show(FUTURE_DATE_MESSAGE);
+    if (!canViewPeriod(gran, anchor, true)) {
+      show('当前只能查看截至今日的数据，无法查看后续日期。');
       return;
     }
     const seq = loadSeqRef.current + 1;
@@ -455,15 +461,22 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   usePolling(
     async (signal) => {
       const seq = loadSeqRef.current;
-      try {
-        const overview = await loadOperationsOverview(signal);
-        if (seq === loadSeqRef.current && !signal.aborted) applyOperationsOverview(overview);
-      } catch {
-        // 修复轮询失败时等待下一轮；Abort 由 usePolling 统一管理。
+      const [overview, facts] = await Promise.allSettled([
+        loadOperationsOverview(signal),
+        getOrderDailyFacts<OrderDailyFact>(comparisonRange[0], comparisonRange[1], {}, {
+          signal, forceRefresh: false,
+        }),
+      ]);
+      if (seq !== loadSeqRef.current || signal.aborted) return;
+      if (overview.status === 'fulfilled') {
+        applyOperationsOverview(overview.value);
+        setLiveCheckedAt(new Date().toISOString());
       }
+      if (facts.status === 'fulfilled') setOrderFacts(facts.value.map(orderFactFromRecord));
+      setLiveCheckFailed(overview.status === 'rejected');
     },
-    repairing ? 5000 : null,
-    [gran, period, dim, excludeToday, comparisonMode, comparisonRange, secondaryDimension],
+    includesToday ? 30000 : repairing ? 5000 : null,
+    [gran, period, dim, comparisonMode, comparisonRange, secondaryDimension, ordersFactRefreshSeq],
   );
   useEffect(() => {
     if (!fullscreenChart) setFullscreenFilterExpanded(false);
@@ -613,6 +626,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         {mobile ? (
           <div className="min-w-0 flex-1">
             <MobileDatePopup
+              allowToday
               label={gran === 'day' ? '日期' : gran === 'week' ? '周' : '月份'}
               title={gran === 'day' ? '选择日期' : gran === 'week' ? '选择周内任意一天' : '选择月份内任意一天'}
               hint={periodText}
@@ -628,21 +642,21 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       {!mobile && (
         <ConfigProvider locale={zhCN}>
           <DatePicker
-            key={`${gran}:${ymd(anchor)}`}
             aria-label={gran === 'week' ? '选择周' : gran === 'month' ? '选择月份' : '选择日期'}
             allowClear={false}
             inputReadOnly
             needConfirm
             picker={pickerMode}
-            defaultValue={dayjs(anchor)}
+            value={pickerValue}
             format={gran === 'week' ? 'YYYY-[W]WW' : gran === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD'}
             className="w-[140px]"
-            disabledDate={(current) => Boolean(current && !current.isBefore(dayjs().startOf('day'), 'day'))}
+            disabledDate={(current) => Boolean(current && current.format('YYYY-MM-DD') > currentBeijingDate())}
             onOk={value => { if (value) setAnchorIfAllowed(value.toDate()); }}
           />
         </ConfigProvider>
       )}
       {!mobile && <Button autoInsertSpace={false} htmlType="button" className="h-auto border-0 px-2 py-1.5 text-xs text-slate-500 shadow-none hover:text-slate-700 cursor-pointer" onClick={() => setAnchor(yesterday())}>昨天</Button>}
+      {!mobile && <Button autoInsertSpace={false} htmlType="button" onClick={() => setAnchor(parseYmd(currentBeijingDate()))}>今天</Button>}
       {canManage && <Button autoInsertSpace={false} htmlType="button" className={`h-auto rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50 cursor-pointer ${mobile ? 'w-full' : 'md:ml-auto'}`} onClick={() => setPushOpen(true)}>设为定时推送</Button>}
       <Button autoInsertSpace={false} htmlType="button" className={`h-auto rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer ${mobile ? 'w-full' : ''}`} disabled={loading} onClick={() => {
         setOrdersFactRefreshSeq(value => value + 1);
@@ -666,6 +680,9 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       <div className="mb-4 hidden flex-wrap items-center gap-2 md:flex">
         {renderControls(false)}
       </div>
+      {includesToday && <p className="mb-3 text-xs text-slate-500" role="status">
+        含当日数据，每 30 秒检查最新汇总。{liveCheckFailed ? '读取暂时失败，保留上次结果并继续重试。' : liveCheckedAt ? `最近读取：${formatBeijingTime(liveCheckedAt)}` : ''}
+      </p>}
       {periodDescription && <p className="mb-3 text-xs text-slate-400">{periodDescription}</p>}
       <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <PeriodMetricCard

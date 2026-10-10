@@ -12,6 +12,8 @@ const analyticsApi = vi.hoisted(() => ({
 }));
 
 vi.mock('../../api/analytics', () => analyticsApi);
+const pollingHook = vi.hoisted(() => ({ usePolling: vi.fn() }));
+vi.mock('../../hooks/usePolling', () => pollingHook);
 
 const operationsApi = vi.hoisted(() => ({
   fetchOperationsOverview: vi.fn().mockResolvedValue({
@@ -428,9 +430,9 @@ describe('mealPeriodTimeRange', () => {
 
 describe('trend point status', () => {
   it('explains current and incomplete periods in the tooltip', () => {
-    expect(trendPointStatusText({ in_progress: true, missing: false })).toBe('进行中，截至昨日');
+    expect(trendPointStatusText({ in_progress: true, missing: false })).toBe('进行中');
     expect(trendPointStatusText({ in_progress: false, missing: true })).toBe('数据不完整');
-    expect(trendPointStatusText({ in_progress: true, missing: true })).toBe('进行中，截至昨日 · 数据不完整');
+    expect(trendPointStatusText({ in_progress: true, missing: true })).toBe('进行中 · 数据不完整');
   });
 });
 
@@ -1389,7 +1391,7 @@ describe('DashboardPage meal metric switch', () => {
     await waitFor(() => expect(dailyFactsApi.getMealDailyFacts).toHaveBeenCalledTimes(1));
     expect(dailyFactsApi.getMealDailyFacts).toHaveBeenCalledWith(
       '2026-02-04',
-      '2026-08-11',
+      '2026-08-12',
       {},
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -1484,4 +1486,64 @@ describe('DashboardPage meal metric switch', () => {
     expect(options).toEqual(expect.objectContaining({ revalidate: true }));
     expect(options.forceRefresh).toBeUndefined();
   });
+});
+
+
+describe('live business dashboard', () => {
+  it('uses today and refreshes daily deltas without force rebuilding', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-10-10T00:30:00+08:00'));
+    dailyFactsApi.getOrderDailyFacts.mockResolvedValue([]);
+    dailyFactsApi.getMealDailyFacts.mockResolvedValue([]);
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenCalled());
+    await waitFor(() => expect(pollingHook.usePolling.mock.calls.some(([, ms]) => ms === 30000)).toBe(true));
+    expect(dailyFactsApi.getOrderDailyFacts.mock.calls[0][1]).toBe('2026-10-10');
+    analyticsApi.getRevenueTrend.mockClear();
+    const controller = new AbortController();
+    const poll = pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1][0];
+    await act(async () => { await poll(controller.signal); });
+    expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenLastCalledWith(expect.any(String), '2026-10-10', {}, {
+      signal: controller.signal, forceRefresh: false,
+    });
+    expect(dailyFactsApi.getMealDailyFacts).toHaveBeenLastCalledWith(expect.any(String), '2026-10-10', {}, {
+      signal: controller.signal, forceRefresh: false,
+    });
+    expect(analyticsApi.getRevenueTrend).not.toHaveBeenCalled();
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({
+      signal: controller.signal, filters: expect.objectContaining({ dateTo: '2026-10-10' }),
+    }));
+  });
+  it('polls the legacy fallback without forced rebuilds and keeps data on failure', async () => {
+    const show = vi.fn();
+    render(createElement(DashboardPage, { show }));
+    await waitFor(() => expect(pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1]?.[1]).toBe(30000));
+    analyticsApi.getRevenueTrend.mockRejectedValueOnce(new Error('temporary outage'));
+    const poll = pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1][0];
+    const controller = new AbortController();
+    await act(async () => { await poll(controller.signal); });
+    expect(analyticsApi.getRevenueTrend).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), 'ALL', 'all',
+      expect.objectContaining({ revalidate: false, signal: expect.any(AbortSignal) }));
+    expect(screen.getByText(/读取暂时失败，保留上次结果/)).toBeTruthy();
+    expect(show).not.toHaveBeenCalled();
+    await act(async () => { await poll(controller.signal); });
+    expect(screen.queryByText(/读取暂时失败，保留上次结果/)).toBeNull();
+  });
+
+  it('aborts fallback requests and ignores late polling responses', async () => {
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1]?.[1]).toBe(30000));
+    let resolveTrend!: (value: { points: [] }) => void;
+    analyticsApi.getRevenueTrend.mockImplementationOnce(() => new Promise(resolve => { resolveTrend = resolve; }));
+    const poll = pollingHook.usePolling.mock.calls[pollingHook.usePolling.mock.calls.length - 1][0];
+    const controller = new AbortController();
+    let pending!: Promise<void>;
+    act(() => { pending = poll(controller.signal); });
+    const requestSignal = analyticsApi.getRevenueTrend.mock.calls[analyticsApi.getRevenueTrend.mock.calls.length - 1][4].signal;
+    controller.abort();
+    expect(requestSignal.aborted).toBe(true);
+    await act(async () => { resolveTrend({ points: [] }); await pending; });
+    expect(screen.queryByText(/最近读取：/)).toBeNull();
+  });
+
 });

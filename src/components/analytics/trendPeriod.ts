@@ -29,7 +29,7 @@ export type DetailPeriodOption = {
 
 export function trendPointStatusText(point?: { in_progress?: boolean; missing?: boolean }): string | null {
   const statuses = [
-    point?.in_progress ? '进行中，截至昨日' : null,
+    point?.in_progress ? '进行中' : null,
     point?.missing ? '数据不完整' : null,
   ].filter(Boolean);
   return statuses.length ? statuses.join(' · ') : null;
@@ -37,7 +37,7 @@ export function trendPointStatusText(point?: { in_progress?: boolean; missing?: 
 
 type TrendDate = string | Dayjs;
 
-export function defaultTrendRange(granularity: TrendGranularity, todayYmd: string): TrendRange {
+export function defaultTrendRange(granularity: TrendGranularity, todayYmd: string, allowToday = false): TrendRange {
   const today = dayjs(todayYmd);
   if (granularity === 'week') {
     const end = today.startOf('isoWeek').subtract(1, 'day');
@@ -57,8 +57,8 @@ export function defaultTrendRange(granularity: TrendGranularity, todayYmd: strin
   }
   return {
     dateFrom: today.subtract(10, 'day').format('YYYY-MM-DD'),
-    dateTo: today.subtract(1, 'day').format('YYYY-MM-DD'),
-    includeCurrent: false,
+    dateTo: today.subtract(allowToday ? 0 : 1, 'day').format('YYYY-MM-DD'),
+    includeCurrent: allowToday,
   };
 }
 
@@ -120,24 +120,25 @@ export function normalizeTrendRange(
   dateTo: TrendDate,
   includeCurrent: boolean,
   todayYmd: string,
+  allowToday = false,
 ): [string, string] {
   const today = dayjs(todayYmd);
-  const yesterday = today.subtract(1, 'day');
+  const latestDay = today.subtract(allowToday ? 0 : 1, 'day');
   let start = dayjs(dateFrom);
   let end = dayjs(dateTo);
 
   if (granularity === 'week') {
     start = start.startOf('isoWeek');
     end = end.endOf('isoWeek');
-    const latest = includeCurrent ? yesterday : today.startOf('isoWeek').subtract(1, 'day');
+    const latest = includeCurrent ? latestDay : today.startOf('isoWeek').subtract(1, 'day');
     if (end.isAfter(latest)) end = latest;
   } else if (granularity === 'month') {
     start = start.startOf('month');
     end = end.endOf('month');
-    const latest = includeCurrent ? yesterday : today.startOf('month').subtract(1, 'day');
+    const latest = includeCurrent ? latestDay : today.startOf('month').subtract(1, 'day');
     if (end.isAfter(latest)) end = latest;
-  } else if (end.isAfter(yesterday)) {
-    end = yesterday;
+  } else if (end.isAfter(latestDay)) {
+    end = latestDay;
   }
 
   if (granularity !== 'day' && end.isBefore(start)) {
@@ -152,16 +153,17 @@ export function toggleCurrentPeriod(
   range: Pick<TrendRange, 'dateFrom' | 'dateTo'>,
   includeCurrent: boolean,
   todayYmd: string,
+  allowToday = false,
 ): TrendRange {
   if (granularity === 'day') {
-    const [, dateTo] = normalizeTrendRange('day', range.dateFrom, range.dateTo, includeCurrent, todayYmd);
+    const [, dateTo] = normalizeTrendRange('day', range.dateFrom, range.dateTo, includeCurrent, todayYmd, allowToday);
     return { ...range, dateTo, includeCurrent };
   }
 
   const today = dayjs(todayYmd);
   const currentStart = granularity === 'week' ? today.startOf('isoWeek') : today.startOf('month');
   const dateTo = includeCurrent
-    ? today.subtract(1, 'day')
+    ? today.subtract(allowToday ? 0 : 1, 'day')
     : dayjs(range.dateTo).isBefore(currentStart)
       ? dayjs(range.dateTo)
       : currentStart.subtract(1, 'day');
