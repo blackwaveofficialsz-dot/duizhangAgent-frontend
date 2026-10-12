@@ -80,6 +80,19 @@ describe('useAgentChat stage lifecycle', () => {
     expect(messages[messages.length - 1]?.content).toContain('[请求失败，请重试]');
   });
 
+  it('rejects a questionnaire answer in legacy mode without sending it or adding a user bubble', async () => {
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => {
+      expect(await result.current.sendMessage('', undefined, {
+        kind: 'clarification_answer', source_turn_id: 'turn-previous', run_id: 'run-previous',
+        clarification_id: 'question-previous', answers: { scope: { option_id: 'sales' } },
+      })).toBe(false);
+    });
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(apiStreamFetch).not.toHaveBeenCalled();
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(0);
+  });
+
   it('treats a terminal SSE failure as final and drops later events', async () => {
     const bytes = new TextEncoder().encode(
       'data: {"type":"stage","code":"querying","label":"读取经营数据","status":"running","step_id":"load_data","elapsed_ms":120,"sequence":1,"visibility":"public"}\n\n'

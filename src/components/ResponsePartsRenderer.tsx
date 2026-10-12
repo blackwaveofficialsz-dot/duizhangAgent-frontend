@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RightOutlined } from '@ant-design/icons';
-import { Alert, Button, Table, notification, type TableColumnsType } from 'antd';
+import { Alert, Button, Input, Radio, Table, notification, type TableColumnsType } from 'antd';
 
-import type { AgentResponseAction, AgentResponsePart, AgentResponsePayload } from '../types';
+import { isQuestionnairePart, type AgentResponseAction, type AgentResponsePart, type AgentResponsePayload, type ChatInteraction, type ClarificationAnswer, type QuestionnairePart } from '../types';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useTableTypewriter } from '../hooks/useTypewriter';
 import { formatDisplayValue } from '../utils/displayValue';
+import { parseBeijingTime } from '../utils/time';
 import { TableDisplayFrame, type TableDisplayData } from './TableDisplayFrame';
 
 const MOBILE_PREVIEW_ROW_LIMIT = 3;
@@ -37,7 +38,9 @@ type ResponsePartsRendererProps = {
   response: AgentResponsePayload;
   onPrompt?: (message: string) => Promise<void>;
   onAction?: (action: AgentResponseAction) => Promise<void>;
+  onInteraction?: (interaction: ChatInteraction) => Promise<void>;
   promptDisabled?: boolean;
+  questionnaireDisabled?: boolean;
   animate?: boolean;
   streaming?: boolean;
   animateInsights?: boolean;
@@ -221,17 +224,128 @@ function NoticePart({ part }: { part: AgentResponsePart }) {
   return <Alert title={part.title} description={part.message} type={part.severity} showIcon />;
 }
 
+function QuestionnaireCard({
+  part, sourceTurnId, disabled, onInteraction,
+}: {
+  part: QuestionnairePart;
+  sourceTurnId: string;
+  disabled: boolean;
+  onInteraction?: (interaction: ChatInteraction) => Promise<void>;
+}) {
+  const [draftAnswers, setDraftAnswers] = useState<Record<string, ClarificationAnswer>>({});
+  const [pending, setPending] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [expired, setExpired] = useState(() => Date.now() >= parseBeijingTime(part.expires_at));
+  const submissionInFlight = useRef(false);
+  const [notificationApi, notificationContextHolder] = notification.useNotification();
+  useEffect(() => {
+    if (part.status !== 'pending') return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    function checkExpiry() {
+      const remaining = parseBeijingTime(part.expires_at) - Date.now();
+      setExpired(remaining <= 0);
+      if (remaining > 0) timer = setTimeout(checkExpiry, Math.min(remaining, 2_147_483_647));
+    }
+    checkExpiry();
+    return () => { if (timer !== undefined) clearTimeout(timer); };
+  }, [part.expires_at, part.status]);
+
+  const status = part.status === 'pending' && expired ? 'expired' : part.status;
+  const readOnly = status !== 'pending' || submitted;
+  const answers = part.status === 'answered' ? part.answers ?? {} : draftAnswers;
+  const complete = part.questions.every((question) => {
+    const answer = draftAnswers[question.id];
+    return Boolean(answer?.option_id || answer?.text?.trim());
+  });
+
+  async function submit() {
+    if (disabled || readOnly || submissionInFlight.current || !complete || !onInteraction
+      || Date.now() >= parseBeijingTime(part.expires_at)) return;
+    submissionInFlight.current = true;
+    setPending(true);
+    const normalizedAnswers = Object.fromEntries(part.questions.map((question) => {
+      const answer = draftAnswers[question.id];
+      return [question.id, answer.option_id ? { option_id: answer.option_id } : { text: answer.text!.trim() }];
+    }));
+    try {
+      await onInteraction({
+        kind: 'clarification_answer', source_turn_id: sourceTurnId,
+        run_id: part.run_id, clarification_id: part.clarification_id, answers: normalizedAnswers,
+      });
+      setDraftAnswers(normalizedAnswers);
+      setSubmitted(true);
+    } catch {
+      notificationApi.error({ title: '提交答案失败', duration: 5, closable: true });
+    } finally {
+      submissionInFlight.current = false;
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="space-y-4 rounded-2xl border border-slate-200/80 bg-white px-4 py-3.5 text-sm text-slate-700 shadow-sm" aria-label="确认问题">
+      {notificationContextHolder}
+      {readOnly && <p className="text-xs text-slate-500">{status === 'answered' ? '已回答' : status === 'expired' ? '已过期' : status === 'cancelled' ? '已取消' : '已提交'}</p>}
+      {part.questions.map((question) => {
+        const answer = answers[question.id];
+        const selected = answer?.text !== undefined ? 0 : question.options.findIndex((option) => option.id === answer?.option_id) + 1 || undefined;
+        const freeText = question.options.length === 0 || selected === 0;
+        return (
+          <fieldset key={question.id} className="min-w-0 space-y-2" aria-label={question.question}>
+            <legend className="mb-2 font-medium text-slate-800">
+              <span className="mr-2 text-xs text-slate-500">{question.header}</span>{question.question}
+            </legend>
+            {readOnly ? (
+              <p className="whitespace-pre-wrap">{answer?.text || question.options.find((option) => option.id === answer?.option_id)?.label || '未回答'}</p>
+            ) : (
+              <>
+                {question.options.length > 0 && (
+                  <Radio.Group className="flex w-full flex-col gap-2" value={selected} disabled={disabled || pending || !onInteraction}
+                    onChange={(event) => setDraftAnswers((current) => ({
+                      ...current, [question.id]: event.target.value === 0 ? { text: '' } : { option_id: question.options[event.target.value - 1].id },
+                    }))}>
+                    {question.options.map((option, index) => (
+                      <Radio key={option.id} value={index + 1} className="!m-0 rounded-lg border border-slate-200 px-3 py-2">
+                        <span>{option.label}</span>
+                        {option.recommended && <span className="ml-2 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">推荐</span>}
+                        {option.description && <span className="mt-1 block text-xs leading-5 text-slate-500">{option.description}</span>}
+                      </Radio>
+                    ))}
+                    {question.allow_free_text && <Radio value={0} className="!m-0 px-3 py-2">其他</Radio>}
+                  </Radio.Group>
+                )}
+                {freeText && (
+                  <Input.TextArea aria-label={question.options.length ? `${question.question}：其他` : question.question}
+                    value={answer?.text ?? ''} disabled={disabled || pending || !onInteraction} rows={2} maxLength={2000}
+                    onChange={(event) => setDraftAnswers((current) => ({ ...current, [question.id]: { text: event.target.value } }))} />
+                )}
+              </>
+            )}
+          </fieldset>
+        );
+      })}
+      {!readOnly && <Button type="primary" autoInsertSpace={false} loading={pending}
+        disabled={disabled || pending || !complete || !onInteraction} onClick={submit}>提交答案</Button>}
+    </section>
+  );
+}
+
 export function ResponsePartsRenderer({
   response,
   onPrompt,
   onAction,
+  onInteraction,
   promptDisabled = false,
+  questionnaireDisabled = false,
   animate = false,
   streaming = false,
   animateInsights = false,
 }: ResponsePartsRendererProps) {
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
   const [notificationApi, notificationContextHolder] = notification.useNotification();
+  const questionnaires = response.parts.filter(isQuestionnairePart);
+  const hideConfirmationStatus = response.result_status === 'needs_confirmation'
+    && questionnaires.length > 0 && questionnaires.every((part) => part.status !== 'pending');
   const payloadActionsBlocked = response.result_status === 'failed' || response.result_status === 'unavailable';
   const promptActions = response.actions?.filter((action) => (
     action.kind === 'prompt' && typeof action.params?.message === 'string'
@@ -269,13 +383,18 @@ export function ResponsePartsRenderer({
   return (
     <div className="w-full space-y-3">
       {notificationContextHolder}
-      {RESULT_STATUS_LABELS[response.result_status] && (
+      {RESULT_STATUS_LABELS[response.result_status] && !hideConfirmationStatus && (
         <div className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
           <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
           {RESULT_STATUS_LABELS[response.result_status]}
         </div>
       )}
       {response.parts.map((part, index) => {
+        if (isQuestionnairePart(part)) {
+          return <QuestionnaireCard key={`questionnaire-${part.run_id}-${part.clarification_id}`} part={part}
+            sourceTurnId={response.source_turn_id} onInteraction={onInteraction}
+            disabled={questionnaireDisabled || payloadActionsBlocked} />;
+        }
         if (part.kind === 'summary' && part.metrics?.length) {
           return (
             <section key={`summary-${index}`} className="rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm" aria-label={part.title || '汇总'}>

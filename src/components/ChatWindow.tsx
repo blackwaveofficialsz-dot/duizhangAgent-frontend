@@ -18,6 +18,7 @@ import { KnowledgeExtractDialog } from './KnowledgeExtractDialog';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Popup, SafeArea } from 'antd-mobile';
 import { AGUI_STATUS_LABELS, isAguiUnresolved } from '../types/agui';
+import { isQuestionnairePart } from '../types';
 
 const LINE_HEIGHT = 24;
 const MAX_ROWS = 4;
@@ -500,6 +501,11 @@ export function ChatWindow() {
                       });
                       if (sent === false) throw new Error('clarification send failed');
                     }}
+                    onInteraction={async (interaction) => {
+                      const sent = await sendMessage('', undefined, interaction);
+                      if (sent === false) throw new Error('questionnaire send failed');
+                    }}
+                    questionnaireDisabled={sending || Boolean(lastMessage?.streaming) || msg.agui?.status === 'failed' || msg.agui?.status === 'cancelled'}
                     promptDisabled={sending || Boolean(lastMessage?.streaming) || Boolean(unresolvedAgui)}
                   />
                 ) : undefined}
@@ -568,7 +574,10 @@ export function ChatWindow() {
                     })}>拒绝</Button>
                   </div>
                 )}
-                {canReconnectAguiRun(msg.agui.runId) && isAguiUnresolved(msg.agui.status) && (
+                {isAguiUnresolved(msg.agui.status)
+                  && (canReconnectAguiRun(msg.agui.runId) || msg.agentResponse?.parts.some((part) => isQuestionnairePart(part)
+                  && part.run_id === msg.agui!.runId && (part.status === 'pending' || part.status === 'expired')))
+                  && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {msg.agui.status === 'disconnected' && <Button htmlType="button" disabled={cancellingAguiRunId === msg.agui.runId}
                       onClick={() => { void reconnectAguiRun(msg.agui!.runId); }}>重连原任务</Button>}

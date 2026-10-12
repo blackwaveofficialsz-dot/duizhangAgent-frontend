@@ -1,7 +1,7 @@
 import { notification } from 'antd';
 import { create } from 'zustand';
 import { apiFetch } from '../api/client';
-import { finishAgentActivity, mergeAgentActivityStep, parseAgentActivity, parseAgentResponsePayload, type AgentActivity, type AgentActivityStatus, type AgentActivityStep, type AgentResponsePayload, type ApprovalRequest, type KnowledgeContext, type KnowledgeSuggestion, type Message, type MessageStage, type QueryEvidence, type QueryExportInfo, type Session, type ToolCallStatus } from '../types';
+import { finishAgentActivity, isQuestionnairePart, mergeAgentActivityStep, parseAgentActivity, parseAgentResponsePayload, type AgentActivity, type AgentActivityStatus, type AgentActivityStep, type AgentResponsePayload, type ApprovalRequest, type KnowledgeContext, type KnowledgeSuggestion, type Message, type MessageStage, type QueryEvidence, type QueryExportInfo, type Session, type ToolCallStatus } from '../types';
 import { createId } from '../utils/id';
 import { parseBeijingTime } from '../utils/time';
 import { registerSessionCleanup } from '../api/sessionLifecycle';
@@ -225,7 +225,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const connectorQuery = m.metadata?.connector_query;
           const runId = typeof m.metadata?.run_id === 'string' ? m.metadata.run_id : m.task_id;
           const deliveryStatus = m.metadata?.delivery_status;
-          const agui: AguiMessageState | undefined = m.role === 'assistant'
+          const agentResponse = parseAgentResponsePayload(m.metadata?.agent_response) ?? undefined;
+          let agui: AguiMessageState | undefined = m.role === 'assistant'
             && (m.metadata?.execution_path === 'general_graph' || m.metadata?.execution_path === 'bounded_react' || m.metadata?.execution_path === 'deterministic_graph')
             && (deliveryStatus === 'completed' || deliveryStatus === 'failed' || deliveryStatus === 'cancelled')
             && typeof runId === 'string'
@@ -238,6 +239,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 retryable: m.metadata.retryable === true,
               }
             : undefined;
+          const questionnaire = agentResponse?.parts.find(isQuestionnairePart);
+          if (!agui && m.role === 'assistant' && questionnaire
+            && (m.metadata?.run_id === undefined || m.metadata.run_id === questionnaire.run_id)) {
+            agui = {
+              runId: questionnaire.run_id,
+              status: questionnaire.status === 'answered' ? 'completed'
+                : questionnaire.status === 'cancelled' ? 'cancelled' : 'interrupted',
+            };
+          }
           return {
             id: m.id,
             role: m.role as 'user' | 'assistant',
@@ -245,7 +255,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             createdAt: parseBeijingTime(m.created_at),
             taskId: m.task_id ?? undefined,
             agui,
-            agentResponse: parseAgentResponsePayload(m.metadata?.agent_response) ?? undefined,
+            agentResponse,
             activity: m.role === 'assistant' ? parseAgentActivity(m.metadata?.agent_activity) ?? undefined : undefined,
             evidence: connectorQuery?.evidence ?? undefined,
             knowledgeSuggestion: connectorQuery?.knowledge_suggestion ?? undefined,
@@ -253,6 +263,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
             knowledgeContext: connectorQuery?.knowledge_context ?? undefined,
           };
         });
+
+      const laterRunRecords = new Set<string>();
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.role !== 'assistant' || !message.agui) continue;
+        const { runId } = message.agui;
+        const accepted = message.agentResponse?.parts.some((part) => isQuestionnairePart(part)
+          && part.run_id === runId && part.status === 'answered');
+        if (accepted && message.agui.status === 'completed' && !laterRunRecords.has(runId)) {
+          messages[index] = { ...message, agui: { ...message.agui, status: 'disconnected' } };
+        }
+        laterRunRecords.add(runId);
+      }
 
       set((s) => ({
         sessions: s.sessions.map((sess) =>

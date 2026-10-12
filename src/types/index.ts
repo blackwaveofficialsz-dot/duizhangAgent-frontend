@@ -2,6 +2,7 @@ export type MessageRole = 'user' | 'assistant' | 'tool_call';
 export * from './agentActivity';
 import type { AgentActivity } from './agentActivity';
 import type { AguiMessageState, ConversationMode } from './agui';
+import { parseBeijingTime } from '../utils/time';
 export type ToolCallStatus = 'loading' | 'completed' | 'failed';
 export type MessageStageStatus = 'running' | 'completed' | 'failed';
 
@@ -74,6 +75,19 @@ export interface AgentResponseAction {
   params?: Record<string, unknown>;
 }
 
+export interface ClarificationAnswer {
+  option_id?: string;
+  text?: string;
+}
+
+export interface ClarificationQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options: Array<{ id: string; label: string; description?: string; recommended?: boolean }>;
+  allow_free_text?: boolean;
+}
+
 export interface AgentResponsePart {
   kind: string;
   title?: string;
@@ -86,6 +100,21 @@ export interface AgentResponsePart {
   items?: AgentResponseInsight[];
   severity?: AgentResponseNoticeSeverity;
   code?: string;
+  clarification_id?: string;
+  run_id?: string;
+  questions?: ClarificationQuestion[];
+  status?: 'pending' | 'answered' | 'expired' | 'cancelled';
+  expires_at?: string;
+  answers?: Record<string, ClarificationAnswer>;
+}
+
+export interface QuestionnairePart extends AgentResponsePart {
+  kind: 'questionnaire';
+  clarification_id: string;
+  run_id: string;
+  questions: ClarificationQuestion[];
+  status: 'pending' | 'answered' | 'expired' | 'cancelled';
+  expires_at: string;
 }
 
 export interface AgentResponsePayload {
@@ -141,6 +170,7 @@ function isAgentResponsePart(value: unknown): value is AgentResponsePart {
     ))
   );
   if (!isBasePart) return false;
+  if (value.kind === 'questionnaire') return isQuestionnairePart(value);
   if (value.kind === 'summary') return value.metrics === undefined || (
     Array.isArray(value.metrics) && value.metrics.length <= 6
   );
@@ -155,6 +185,48 @@ function isAgentResponsePart(value: unknown): value is AgentResponsePart {
       && isNonEmptyString(value.code);
   }
   return true;
+}
+
+export function isQuestionnairePart(value: unknown): value is QuestionnairePart {
+  if (!isRecord(value)
+    || value.kind !== 'questionnaire'
+    || !isNonEmptyString(value.clarification_id)
+    || !isNonEmptyString(value.run_id)
+    || !['pending', 'answered', 'expired', 'cancelled'].includes(value.status as string)
+    || !isNonEmptyString(value.expires_at)
+    || !Number.isFinite(parseBeijingTime(value.expires_at))
+    || !Array.isArray(value.questions)
+    || value.questions.length < 1 || value.questions.length > 3
+    || !value.questions.every(isClarificationQuestion)
+    || new Set(value.questions.map((question) => question.id)).size !== value.questions.length
+  ) return false;
+  if (value.answers === undefined) return value.status !== 'answered';
+  if (!isRecord(value.answers)) return false;
+  const questions = value.questions;
+  if (value.status === 'answered' && Object.keys(value.answers).length !== questions.length) return false;
+  return Object.entries(value.answers).every(([questionId, answer]) => {
+    const question = questions.find((item) => item.id === questionId);
+    if (!question || !isRecord(answer) || Object.keys(answer).length !== 1) return false;
+    return (isNonEmptyString(answer.option_id)
+      && question.options.some((option) => option.id === answer.option_id))
+      || (isNonEmptyString(answer.text) && (question.allow_free_text === true || question.options.length === 0));
+  });
+}
+
+function isClarificationQuestion(value: unknown): value is ClarificationQuestion {
+  return isRecord(value)
+    && isNonEmptyString(value.id)
+    && isNonEmptyString(value.header)
+    && isNonEmptyString(value.question)
+    && (value.allow_free_text === undefined || typeof value.allow_free_text === 'boolean')
+    && Array.isArray(value.options)
+    && (value.options.length === 0 || (value.options.length >= 2 && value.options.length <= 3))
+    && value.options.every((option) => isRecord(option)
+      && isNonEmptyString(option.id)
+      && isNonEmptyString(option.label)
+      && (option.description === undefined || typeof option.description === 'string')
+      && (option.recommended === undefined || typeof option.recommended === 'boolean'))
+    && new Set(value.options.map((option) => option.id)).size === value.options.length;
 }
 
 function isAgentResponseMetric(value: unknown): value is AgentResponseMetric {
@@ -286,11 +358,17 @@ export interface FileSet {
   taskType?: 'file_parsing' | 'reconciliation';
 }
 
-export interface ChatInteraction {
+export type ChatInteraction = {
   kind: 'clarification_choice';
   source_turn_id: string;
   candidate_id: string;
-}
+} | {
+  kind: 'clarification_answer';
+  source_turn_id: string;
+  run_id: string;
+  clarification_id: string;
+  answers: Record<string, ClarificationAnswer>;
+};
 
 export interface KbEntry {
   id: string;

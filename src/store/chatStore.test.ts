@@ -14,6 +14,22 @@ vi.mock('antd', () => ({ notification: { error: mocks.notificationError } }));
 
 import { useChatStore } from './chatStore';
 
+function questionnairePayload(partOverrides: Record<string, unknown> = {}) {
+  return {
+    version: 1, domain: 'analytics', task: 'sales_summary', result_status: 'needs_confirmation',
+    result_id: 'result-1', source_turn_id: 'turn-1',
+    parts: [{
+      kind: 'questionnaire', clarification_id: 'clarify-1', run_id: 'run-1', status: 'pending',
+      expires_at: '2026-10-11T12:00:00',
+      questions: [{ id: 'scope', header: '范围', question: '统计哪些门店？', allow_free_text: true, options: [
+        { id: 'all', label: '全部门店', description: '已授权门店', recommended: true },
+        { id: 'one', label: '指定门店' },
+      ] }],
+      ...partOverrides,
+    }],
+  };
+}
+
 function sessions(): Session[] {
   return [
     {
@@ -36,6 +52,149 @@ beforeEach(() => {
 });
 
 describe('chatStore optimistic deletion', () => {
+  it('restores pending and answered questionnaires from history metadata', async () => {
+    useChatStore.setState({
+      sessions: [{ id: 'session-1', title: '历史会话', messages: [], createdAt: 0, loaded: false }],
+      activeSessionId: 'session-1',
+    });
+    const pending = questionnairePayload();
+    const answered = questionnairePayload({ status: 'answered', answers: { scope: { option_id: 'all' } } });
+    mocks.apiFetch.mockResolvedValueOnce({ ok: true, json: vi.fn().mockResolvedValue({
+      session_id: 'session-1', title: '历史会话', messages: [
+        { id: 'pending', role: 'assistant', content: '请确认范围', created_at: '2026-10-11T10:00:00+08:00', metadata: { agent_response: pending } },
+        { id: 'answered', role: 'assistant', content: '已确认范围', created_at: '2026-10-11T10:01:00+08:00', metadata: { agent_response: answered } },
+      ],
+    }) });
+    await useChatStore.getState().loadSessionHistory('session-1');
+    expect(useChatStore.getState().sessions[0].messages.map((message) => message.agentResponse)).toEqual([pending, answered]);
+    expect(useChatStore.getState().sessions[0].messages.map((message) => message.agui)).toEqual([
+      { runId: 'run-1', status: 'interrupted' }, { runId: 'run-1', status: 'disconnected' },
+    ]);
+  });
+
+  it.each(['completed', 'failed', 'cancelled', 'pending', 'answered'])(
+    'only restores the latest answered card when a later same-run record is %s', async (laterStatus) => {
+      useChatStore.setState({ sessions: [{ id: 'session-1', title: '历史会话', messages: [], createdAt: 0, loaded: false }] });
+      const answered = questionnairePayload({ status: 'answered', answers: { scope: { option_id: 'all' } } });
+      const laterMetadata = ['pending', 'answered'].includes(laterStatus)
+        ? { agent_response: questionnairePayload({
+          clarification_id: 'clarify-2', status: laterStatus,
+          ...(laterStatus === 'answered' ? { answers: { scope: { option_id: 'one' } } } : {}),
+        }) }
+        : { run_id: 'run-1', execution_path: 'general_graph', delivery_status: laterStatus };
+      mocks.apiFetch.mockResolvedValueOnce({ ok: true, json: vi.fn().mockResolvedValue({
+        session_id: 'session-1', title: '历史会话', messages: [
+          { id: 'answered', role: 'assistant', content: '已确认范围', created_at: '2026-10-11T10:00:00+08:00',
+            metadata: { run_id: 'run-1', execution_path: 'general_graph', delivery_status: 'completed', agent_response: answered } },
+          { id: 'later', role: 'assistant', content: '后续结果', created_at: '2026-10-11T10:01:00+08:00', metadata: laterMetadata },
+        ],
+      }) });
+
+      await useChatStore.getState().loadSessionHistory('session-1');
+
+      const messages = useChatStore.getState().sessions[0].messages;
+      expect(messages[0].agui?.status).toBe('completed');
+      expect(messages[0].agentResponse?.parts[0]).toMatchObject({ status: 'answered' });
+      expect(messages[1].agui?.status).toBe(laterStatus === 'pending' ? 'interrupted'
+        : laterStatus === 'answered' ? 'disconnected' : laterStatus);
+    },
+  );
+
+  it.each([
+    ['expired', 'interrupted'], ['cancelled', 'cancelled'],
+  ])('restores an assistant %s questionnaire as %s without execution metadata', async (status, expected) => {
+    useChatStore.setState({ sessions: [{ id: 'session-1', title: '历史会话', messages: [], createdAt: 0, loaded: false }] });
+    mocks.apiFetch.mockResolvedValueOnce({ ok: true, json: vi.fn().mockResolvedValue({
+      session_id: 'session-1', title: '历史会话', messages: [{
+        id: 'questionnaire', role: 'assistant', content: '范围确认', created_at: '2026-10-11T10:00:00+08:00',
+        metadata: { agent_response: questionnairePayload({ status }) },
+      }],
+    }) });
+    await useChatStore.getState().loadSessionHistory('session-1');
+    expect(useChatStore.getState().sessions[0].messages[0].agui).toEqual({ runId: 'run-1', status: expected });
+  });
+
+  it('preserves terminal delivery status and does not derive questionnaire runs from mismatched or user metadata', async () => {
+    useChatStore.setState({ sessions: [{ id: 'session-1', title: '历史会话', messages: [], createdAt: 0, loaded: false }] });
+    const agentResponse = questionnairePayload();
+    mocks.apiFetch.mockResolvedValueOnce({ ok: true, json: vi.fn().mockResolvedValue({
+      session_id: 'session-1', title: '历史会话', messages: [
+        { id: 'failed', role: 'assistant', content: '失败', created_at: '2026-10-11T10:00:00+08:00',
+          metadata: { run_id: 'run-1', execution_path: 'general_graph', delivery_status: 'failed', agent_response: agentResponse } },
+        { id: 'mismatched', role: 'assistant', content: '无效关联', created_at: '2026-10-11T10:00:00+08:00',
+          metadata: { run_id: 'another-run', agent_response: agentResponse } },
+        { id: 'user', role: 'user', content: '用户消息', created_at: '2026-10-11T10:00:00+08:00',
+          metadata: { agent_response: agentResponse } },
+      ],
+    }) });
+    await useChatStore.getState().loadSessionHistory('session-1');
+    expect(useChatStore.getState().sessions[0].messages.map((message) => message.agui)).toEqual([
+      { runId: 'run-1', status: 'failed', retryable: false }, undefined, undefined,
+    ]);
+  });
+
+  it.each(['cancelled', 'failed'])('keeps accepted answers read-only and preserves a %s run after refresh', async (deliveryStatus) => {
+    useChatStore.setState({ sessions: [{ id: 'session-1', title: '历史会话', messages: [], createdAt: 0, loaded: false }] });
+    const accepted = questionnairePayload({ status: 'answered', answers: { scope: { option_id: 'all' } } });
+    mocks.apiFetch.mockResolvedValueOnce({ ok: true, json: vi.fn().mockResolvedValue({
+      session_id: 'session-1', title: '历史会话', messages: [{
+        id: 'accepted', role: 'assistant', content: '已确认范围', created_at: '2026-10-11T10:00:00+08:00',
+        metadata: { run_id: 'run-1', execution_path: 'general_graph', delivery_status: deliveryStatus, agent_response: accepted },
+      }],
+    }) });
+
+    await useChatStore.getState().loadSessionHistory('session-1');
+
+    const message = useChatStore.getState().sessions[0].messages[0];
+    expect(message.agui).toEqual({ runId: 'run-1', status: deliveryStatus, retryable: false });
+    expect(message.agentResponse).toEqual(accepted);
+    expect(message.agentResponse?.parts[0]).toMatchObject({ status: 'answered', answers: { scope: { option_id: 'all' } } });
+  });
+
+  it('accepts bounded questionnaire choices and pure text answers in the v1 parser', () => {
+    expect(parseAgentResponsePayload(questionnairePayload())).not.toBeNull();
+    expect(parseAgentResponsePayload(questionnairePayload({ status: 'answered', answers: { scope: { option_id: 'all' } } }))).not.toBeNull();
+    expect(parseAgentResponsePayload(questionnairePayload({
+      questions: [{ id: 'note', header: '说明', question: '补充要求', options: [] }],
+      status: 'answered', answers: { note: { text: '按小时展示' } },
+    }))).not.toBeNull();
+    expect(parseAgentResponsePayload({ ...questionnairePayload(), parts: [{ kind: 'future_kind' }] })).not.toBeNull();
+  });
+
+  it('rejects malformed, oversized, or ambiguous questionnaire questions', () => {
+    const question = { id: 'scope', header: '范围', question: '统计哪些门店？', options: [
+      { id: 'all', label: '全部门店' }, { id: 'one', label: '指定门店' },
+    ] };
+    for (const part of [
+      { clarification_id: '' }, { run_id: '' }, { status: 'unknown' }, { expires_at: 'not-a-date' },
+      { questions: [] }, { questions: Array.from({ length: 4 }, (_, index) => ({ ...question, id: String(index) })) },
+      { questions: [question, question] }, { questions: [{ ...question, header: '' }] },
+      { questions: [{ ...question, question: '' }] }, { questions: [{ ...question, allow_free_text: 'yes' }] },
+      { questions: [{ ...question, options: [question.options[0]] }] },
+      { questions: [{ ...question, options: Array.from({ length: 4 }, (_, index) => ({ id: String(index), label: '门店' })) }] },
+      { questions: [{ ...question, options: [question.options[0], question.options[0]] }] },
+      { questions: [{ ...question, options: [{ id: '', label: '门店' }, question.options[1]] }] },
+      { questions: [{ ...question, options: [{ id: 'all', label: '全部门店', recommended: 'yes' }, question.options[1]] }] },
+    ]) {
+      expect(parseAgentResponsePayload(questionnairePayload(part)), JSON.stringify(part)).toBeNull();
+    }
+  });
+
+  it('rejects incomplete or unauthorized questionnaire answers', () => {
+    for (const answers of [
+      undefined, {}, { scope: {} }, { scope: { option_id: 'unknown' } }, { scope: { text: ' ' } },
+      { wrong: { text: '其他问题' } }, { scope: { option_id: 'all', text: '混合答案' } },
+      { scope: { option_id: 'all', unexpected: 'payload' } },
+    ]) {
+      expect(parseAgentResponsePayload(questionnairePayload({ status: 'answered', answers }))).toBeNull();
+    }
+    expect(parseAgentResponsePayload(questionnairePayload({
+      questions: [{ id: 'scope', header: '范围', question: '统计哪些门店？', options: [
+        { id: 'all', label: '全部门店' }, { id: 'one', label: '指定门店' },
+      ] }],
+      status: 'answered', answers: { scope: { text: '未经允许的自由输入' } },
+    }))).toBeNull();
+  });
   it('rolls back a session and reports an HTTP deletion failure', async () => {
     mocks.apiFetch.mockResolvedValueOnce({ ok: false });
 

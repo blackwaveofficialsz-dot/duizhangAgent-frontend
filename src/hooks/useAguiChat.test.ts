@@ -7,6 +7,7 @@ import { useAuthStore } from '../store/authStore';
 import { useChatStore } from '../store/chatStore';
 import { useAgentChat } from './useAgentChat';
 import type { AguiRunInput } from '../types/agui';
+import type { AgentResponsePayload } from '../types';
 
 vi.mock('../api/client', () => ({ apiFetch: vi.fn(), apiStreamFetch: vi.fn() }));
 vi.mock('antd', () => ({ notification: { error: vi.fn(), info: vi.fn(), success: vi.fn() } }));
@@ -24,13 +25,14 @@ const textFrames = (input: AguiRunInput) => frame(input, 0, 'RUN_STARTED')
   + frame(input, 1, 'TEXT_MESSAGE_START', { messageId: 'text-1', role: 'assistant' })
   + frame(input, 2, 'TEXT_MESSAGE_CONTENT', { messageId: 'text-1', delta: '你好' });
 
-function mockStream(events: (input: AguiRunInput) => string, hold = false, sessionId?: string) {
+function mockStream(events: (input: AguiRunInput) => string, hold = false, sessionId?: string, runId?: string) {
   let channel: ReadableStreamDefaultController<Uint8Array>;
   const cancel = vi.fn();
   const release = vi.fn();
   let body: ReadableStream<Uint8Array>;
   vi.mocked(apiStreamFetch).mockImplementationOnce(async (_url, options) => {
     const input = JSON.parse(options!.body as string) as AguiRunInput;
+    if (runId) input.runId = runId;
     body = new ReadableStream<Uint8Array>({
       start(controller) {
         channel = controller;
@@ -46,6 +48,36 @@ function mockStream(events: (input: AguiRunInput) => string, hold = false, sessi
   return { cancel, release, emit: (events: string) => channel.enqueue(new TextEncoder().encode(events)), locked: () => body.locked };
 }
 
+const questionnaire = (runId = 'run-original', status = 'pending') => ({
+  version: 1, domain: 'platform', task: 'clarification', result_status: 'needs_confirmation',
+  result_id: 'result-questionnaire', source_turn_id: 'turn-original', parts: [{
+    kind: 'questionnaire', clarification_id: 'clarification-1', run_id: runId,
+    questions: [{ id: 'scope', header: '数据范围', question: '查看哪类订单？', options: [
+      { id: 'sales', label: '经营订单', recommended: true }, { id: 'refunds', label: '退款订单' },
+    ], allow_free_text: true }], status, expires_at: '2099-10-11T10:00:00+08:00',
+    ...(status === 'answered' ? { answers: { scope: { option_id: 'sales' } } } : {}),
+  }],
+}) as unknown as AgentResponsePayload;
+
+function restoreQuestionnaire() {
+  useChatStore.setState({ sessions: [{
+    id: 'thread-1', title: '订单分析', createdAt: 0, conversationMode: 'agui', messages: [
+      { id: 'user-original', role: 'user', content: '给我上周订单', createdAt: 0 },
+      { id: 'question-card', role: 'assistant', content: '请确认范围', createdAt: 1,
+        agentResponse: questionnaire(), agui: { runId: 'run-original', status: 'interrupted' } },
+    ],
+  }] });
+}
+
+function restoreAcceptedQuestionnaire(expiresAt = '2099-10-11T10:00:00+08:00') {
+  restoreQuestionnaire();
+  const accepted = questionnaire('run-original', 'answered');
+  useChatStore.getState().setMessageAgentResponse('thread-1', 'question-card', {
+    ...accepted, parts: accepted.parts.map((part) => ({ ...part, expires_at: expiresAt })),
+  });
+  useChatStore.getState().setMessageAgui('thread-1', 'question-card', { runId: 'run-original', status: 'disconnected' });
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv('VITE_AGUI_CHAT_ENABLED', 'true');
@@ -57,6 +89,369 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('AG-UI opt-in conversation', () => {
+  it.each(['2099-10-11T10:00:00+08:00', '2020-10-11T10:00:00+08:00'])(
+    'reconnects an accepted answer with expiry %s on the same run after its read-only card', async (expiresAt) => {
+    restoreAcceptedQuestionnaire(expiresAt);
+    const stream = mockStream((input) => textFrames(input) + frame(input, 3, 'RUN_FINISHED'), false, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+    expect(result.current.canReconnectAguiRun('run-original')).toBe(true);
+
+    await act(async () => {
+      expect(await result.current.sendMessage('另一个问题')).toBe(false);
+      expect(await result.current.reconnectAguiRun('run-original')).toBe(true);
+    });
+
+    expect(apiStreamFetch).toHaveBeenCalledOnce();
+    expect(apiStreamFetch).toHaveBeenCalledWith('/api/v1/agui/runs/run-original/clarification', expect.anything());
+    expect(JSON.parse(vi.mocked(apiStreamFetch).mock.calls[0][1]!.body as string)).toEqual({
+      threadId: 'thread-1', requestId: expect.any(String), clarificationId: 'clarification-1',
+      answers: { scope: { option_id: 'sales' } },
+    });
+    const messages = useChatStore.getState().sessions[0].messages;
+    expect(messages).toHaveLength(3);
+    expect(messages[1]).toMatchObject({ content: '请确认范围', agui: { status: 'completed' }, agentResponse: { parts: [{ status: 'answered' }] } });
+    expect(messages[2]).toMatchObject({ content: '你好', streaming: false, agui: { runId: 'run-original', status: 'completed' } });
+    expect(stream.release).toHaveBeenCalledOnce();
+    expect(result.current.canReconnectAguiRun('run-original')).toBe(false);
+    },
+  );
+
+  it('guards duplicate restored reconnections and reuses the answer request after a network break', async () => {
+    restoreAcceptedQuestionnaire();
+    const stream = mockStream(textFrames, true, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+    let connecting: Promise<unknown>;
+    await act(async () => { connecting = result.current.reconnectAguiRun('run-original'); });
+    await act(async () => { expect(await result.current.reconnectAguiRun('run-original')).toBe(false); });
+    expect(apiStreamFetch).toHaveBeenCalledOnce();
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(3);
+    const firstBody = vi.mocked(apiStreamFetch).mock.calls[0][1]!.body;
+    await act(async () => {
+      stream.emit('data: invalid-json\n\n');
+      expect(await connecting!).toBe(false);
+    });
+    mockStream((input) => frame(input, 3, 'RUN_FINISHED'), false, undefined, 'run-original');
+
+    await act(async () => { expect(await result.current.reconnectAguiRun('run-original')).toBe(true); });
+
+    expect(vi.mocked(apiStreamFetch).mock.calls[1][1]!.body).toBe(firstBody);
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(3);
+    expect(stream.release).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a restored accepted run without submitting its answers again', async () => {
+    restoreAcceptedQuestionnaire();
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      accepted: true, run_id: 'run-original', run_status: 'cancelled', task_status: 'cancelled', event_cursor: 2,
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    const { result } = renderHook(() => useAgentChat());
+
+    await act(async () => { await result.current.cancelAguiRun('run-original'); });
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/agent-runs/cancel', expect.anything());
+    expect(apiStreamFetch).not.toHaveBeenCalled();
+    expect(assistant()).toMatchObject({ content: '请确认范围', agui: { status: 'cancelled' }, agentResponse: { parts: [{ status: 'answered' }] } });
+    expect(result.current.canReconnectAguiRun('run-original')).toBe(false);
+  });
+
+  it('can reconnect after a failed historical cancellation without appending results to the answered card', async () => {
+    restoreAcceptedQuestionnaire();
+    vi.mocked(apiFetch).mockRejectedValueOnce(new Error('offline'));
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { await expect(result.current.cancelAguiRun('run-original')).rejects.toThrow('offline'); });
+    mockStream((input) => textFrames(input) + frame(input, 3, 'RUN_FINISHED'), false, undefined, 'run-original');
+
+    await act(async () => { expect(await result.current.reconnectAguiRun('run-original')).toBe(true); });
+
+    const messages = useChatStore.getState().sessions[0].messages;
+    expect(messages).toHaveLength(3);
+    expect(messages[1].content).toBe('请确认范围');
+    expect(messages[2].content).toBe('你好');
+  });
+
+  it.each(['cancel', 'unmount'] as const)('releases a restored accepted continuation on %s', async (reason) => {
+    restoreAcceptedQuestionnaire();
+    const stream = mockStream(textFrames, true, undefined, 'run-original');
+    const { result, unmount } = renderHook(() => useAgentChat());
+    let connecting: Promise<unknown>;
+    await act(async () => { connecting = result.current.reconnectAguiRun('run-original'); });
+    await act(async () => {
+      if (reason === 'cancel') {
+        vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({
+          accepted: true, run_id: 'run-original', run_status: 'cancelled', task_status: 'cancelled', event_cursor: 2,
+        }), { headers: { 'Content-Type': 'application/json' } }));
+        await result.current.cancelAguiRun('run-original');
+      } else unmount();
+      await connecting!;
+    });
+
+    expect(assistant()).toMatchObject({ streaming: false, stage: null,
+      agui: { status: reason === 'cancel' ? 'cancelled' : 'disconnected' } });
+    expect(useChatStore.getState().sessions[0].messages[1].agentResponse?.parts[0]).toMatchObject({ status: 'answered' });
+    expect(stream.release).toHaveBeenCalledOnce();
+    expect(stream.cancel).toHaveBeenCalledOnce();
+    expect(stream.locked()).toBe(false);
+  });
+
+  it('resumes the original run from a restored questionnaire and updates its card without adding a user bubble', async () => {
+    restoreQuestionnaire();
+    const stream = mockStream((input) => frame(input, 0, 'STATE_SNAPSHOT', { snapshot: {
+      agent_response: questionnaire(input.runId, 'answered'),
+    } }) + textFrames(input) + frame(input, 4, 'RUN_FINISHED'), false, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+
+    await act(async () => {
+      expect(await result.current.sendMessage('', undefined, {
+        kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: 'run-original',
+        clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+      })).toBe(true);
+    });
+
+    expect(apiStreamFetch).toHaveBeenCalledWith('/api/v1/agui/runs/run-original/clarification', expect.anything());
+    expect(JSON.parse(vi.mocked(apiStreamFetch).mock.calls[0][1]!.body as string)).toEqual({
+      threadId: 'thread-1', requestId: expect.any(String), clarificationId: 'clarification-1',
+      answers: { scope: { option_id: 'sales' } },
+    });
+    const messages = useChatStore.getState().sessions[0].messages;
+    expect(messages.filter((message) => message.role === 'user')).toHaveLength(1);
+    expect(messages.find((message) => message.id === 'question-card')).toMatchObject({
+      agui: { status: 'completed' }, agentResponse: { parts: [{ status: 'answered', answers: { scope: { option_id: 'sales' } } }] },
+    });
+    expect(assistant()).toMatchObject({ content: '你好', streaming: false, stage: null, agui: { runId: 'run-original', status: 'completed' } });
+    expect(assistant().agentResponse?.parts.some((part) => part.kind === 'questionnaire')).not.toBe(true);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(stream.release).toHaveBeenCalledOnce();
+    expect(stream.locked()).toBe(false);
+  });
+
+  it('rejects a questionnaire answer for a different source before contacting the server', async () => {
+    restoreQuestionnaire();
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => {
+      expect(await result.current.sendMessage('', undefined, {
+        kind: 'clarification_answer', source_turn_id: 'another-turn', run_id: 'run-original',
+        clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+      })).toBe(false);
+    });
+    expect(apiStreamFetch).not.toHaveBeenCalled();
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(2);
+  });
+
+  it('continues a live questionnaire using its event cursor and then permits the next turn', async () => {
+    const initial = mockStream((input) => frame(input, 0, 'RUN_STARTED') + frame(input, 1, 'STATE_SNAPSHOT', {
+      snapshot: { agent_response: questionnaire(input.runId) },
+    }) + frame(input, 2, 'RUN_FINISHED', { outcome: { type: 'interrupt' } }));
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { expect(await result.current.sendMessage('给我上周订单')).toBe(true); });
+    const input = inputAt();
+    expect(assistant()).toMatchObject({ streaming: false, agui: { status: 'interrupted' } });
+    expect(initial.release).toHaveBeenCalledOnce();
+    const continuation = mockStream((scope) => frame(scope, 0, 'STATE_SNAPSHOT', {
+      sequence: 2, eventId: `${scope.runId}:2:0`, snapshot: { agent_response: questionnaire(scope.runId, 'answered') },
+    }) + frame(scope, 1, 'TEXT_MESSAGE_START', { sequence: 2, eventId: `${scope.runId}:2:1`, messageId: 'text-final', role: 'assistant' })
+      + frame(scope, 2, 'TEXT_MESSAGE_CONTENT', { sequence: 2, eventId: `${scope.runId}:2:2`, messageId: 'text-final', delta: '订单结果' })
+      + frame(scope, 3, 'RUN_FINISHED', { sequence: 2, eventId: `${scope.runId}:2:3` }), false, undefined, input.runId);
+    await act(async () => {
+      expect(await result.current.sendMessage('', undefined, {
+        kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: input.runId,
+        clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+      })).toBe(true);
+    });
+    expect(apiStreamFetch).toHaveBeenLastCalledWith(`/api/v1/agui/runs/${input.runId}/clarification`, expect.objectContaining({
+      headers: expect.objectContaining({ 'Last-Event-ID': `${input.runId}:1:2` }),
+    }));
+    expect(assistant().content).toBe('订单结果');
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(3);
+    expect(continuation.release).toHaveBeenCalledOnce();
+    mockStream((scope) => frame(scope, 0, 'RUN_FINISHED'));
+    await act(async () => { expect(await result.current.sendMessage('再按门店展示')).toBe(true); });
+    expect(inputAt(2).runId).not.toBe(input.runId);
+  });
+
+  it.each(['cancel', 'unmount'] as const)('cleans up a questionnaire continuation on %s', async (reason) => {
+    restoreQuestionnaire();
+    const stream = mockStream((input) => frame(input, 0, 'RUN_STARTED'), true, undefined, 'run-original');
+    const { result, unmount } = renderHook(() => useAgentChat());
+    let sending: Promise<unknown>;
+    await act(async () => { sending = result.current.sendMessage('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: 'run-original',
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    }); });
+    await act(async () => {
+      if (reason === 'cancel') {
+        vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({
+          accepted: true, run_id: 'run-original', run_status: 'cancelled', task_status: 'cancelled', event_cursor: 2,
+        })));
+        await result.current.cancelAguiRun('run-original');
+      } else unmount();
+      await sending!;
+    });
+    expect(assistant()).toMatchObject({ streaming: false, stage: null, agui: { status: reason === 'cancel' ? 'cancelled' : 'disconnected' } });
+    expect(stream.cancel).toHaveBeenCalledOnce();
+    expect(stream.release).toHaveBeenCalledOnce();
+    expect(stream.locked()).toBe(false);
+    if (reason === 'unmount') expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('cancels a restored questionnaire without resubmitting answers and updates the original card', async () => {
+    restoreQuestionnaire();
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      accepted: true, run_id: 'run-original', run_status: 'cancelled', task_status: 'cancelled', event_cursor: 2,
+    })));
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { await result.current.cancelAguiRun('run-original'); });
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/agent-runs/cancel', expect.objectContaining({
+      body: expect.stringContaining('"run_id":"run-original"'),
+    }));
+    expect(apiStreamFetch).not.toHaveBeenCalled();
+    expect(assistant()).toMatchObject({ agui: { status: 'cancelled' }, agentResponse: { parts: [{ status: 'cancelled' }] } });
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(2);
+  });
+
+  it.each([
+    ['clarification_expired', 'expired', 'failed', 'expired'],
+    ['clarification_cancelled', 'cancelled', 'cancelled', 'cancelled'],
+    ['clarification_run_failed', 'failed', 'failed', 'pending'],
+  ] as const)('terminates a rejected questionnaire with %s and preserves its server state', async (code, status, runStatus, cardStatus) => {
+    restoreQuestionnaire();
+    const release = vi.fn();
+    vi.mocked(apiStreamFetch).mockImplementationOnce(async (_url, options) => ({
+      response: new Response(JSON.stringify({ detail: { code, message: '问卷已结束', status } }), {
+        status: 409, headers: { 'Content-Type': 'application/json' },
+      }), signal: options!.signal as AbortSignal, release,
+    }));
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => {
+      expect(await result.current.sendMessage('', undefined, {
+        kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: 'run-original',
+        clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+      })).toBe(false);
+    });
+    expect(assistant()).toMatchObject({ streaming: false, stage: null, agui: { status: runStatus, detail: '问卷已结束' } });
+    expect(useChatStore.getState().sessions[0].messages[1]).toMatchObject({
+      agui: { status: runStatus }, agentResponse: { parts: [{ status: cardStatus }] },
+    });
+    expect(result.current.canReconnectAguiRun('run-original')).toBe(false);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a conflicting questionnaire editable for a corrected submission without reconnecting rejected answers', async () => {
+    restoreQuestionnaire();
+    vi.mocked(apiStreamFetch).mockImplementationOnce(async (_url, options) => ({
+      response: new Response(JSON.stringify({ detail: {
+        code: 'clarification_conflict', message: '答案已冲突，请重新选择', status: 'pending',
+      } }), { status: 409, headers: { 'Content-Type': 'application/json' } }),
+      signal: options!.signal as AbortSignal, release: vi.fn(),
+    }));
+    const { result } = renderHook(() => useAgentChat());
+    const interaction = {
+      kind: 'clarification_answer' as const, source_turn_id: 'turn-original', run_id: 'run-original',
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    };
+    await act(async () => { expect(await result.current.sendMessage('', undefined, interaction)).toBe(false); });
+    expect(assistant().agui?.status).toBe('failed');
+    expect(useChatStore.getState().sessions[0].messages[1]).toMatchObject({
+      agui: { status: 'interrupted' }, agentResponse: { parts: [{ status: 'pending' }] },
+    });
+    await act(async () => { expect(await result.current.reconnectAguiRun('run-original')).toBe(false); });
+    mockStream((input) => frame(input, 0, 'RUN_FINISHED'), false, undefined, 'run-original');
+    await act(async () => { expect(await result.current.sendMessage('', undefined, {
+      ...interaction, answers: { scope: { option_id: 'refunds' } },
+    })).toBe(true); });
+    expect(apiStreamFetch).toHaveBeenCalledTimes(2);
+    const requests = vi.mocked(apiStreamFetch).mock.calls.map((call) => JSON.parse(call[1]!.body as string));
+    expect(requests[1].requestId).not.toBe(requests[0].requestId);
+    expect(requests[1].answers).toEqual({ scope: { option_id: 'refunds' } });
+  });
+
+  it('reconnects a disconnected questionnaire using the same answer request and applied cursor', async () => {
+    restoreQuestionnaire();
+    mockStream(textFrames, false, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { expect(await result.current.sendMessage('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: 'run-original',
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    })).toBe(false); });
+    const original = JSON.parse(vi.mocked(apiStreamFetch).mock.calls[0][1]!.body as string);
+    mockStream((input) => frame(input, 3, 'STATE_SNAPSHOT', { snapshot: { agent_response: questionnaire(input.runId, 'answered') } })
+      + frame(input, 4, 'RUN_FINISHED'), false, undefined, 'run-original');
+    await act(async () => { expect(await result.current.reconnectAguiRun('run-original')).toBe(true); });
+    expect(apiStreamFetch).toHaveBeenLastCalledWith('/api/v1/agui/runs/run-original/clarification', expect.objectContaining({
+      body: JSON.stringify(original), headers: expect.objectContaining({ 'Last-Event-ID': 'run-original:1:2' }),
+    }));
+    expect(assistant()).toMatchObject({ content: '你好', agui: { status: 'completed' } });
+    expect(useChatStore.getState().sessions[0].messages).toHaveLength(3);
+  });
+
+  it('submits a live questionnaire through the canonical session returned by the initial stream', async () => {
+    mockStream((input) => frame(input, 0, 'STATE_SNAPSHOT', { snapshot: { agent_response: questionnaire(input.runId) } })
+      + frame(input, 1, 'RUN_FINISHED', { outcome: { type: 'interrupt' } }), false, 'tenant:tenant-1:thread-1');
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { expect(await result.current.sendMessage('查询订单')).toBe(true); });
+    const runId = inputAt().runId;
+    mockStream((input) => frame(input, 2, 'STATE_SNAPSHOT', { snapshot: { agent_response: questionnaire(input.runId, 'answered') } })
+      + frame(input, 3, 'RUN_FINISHED'), false, undefined, runId);
+    await act(async () => { expect(await result.current.sendMessage('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: runId,
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    })).toBe(true); });
+    expect(JSON.parse(vi.mocked(apiStreamFetch).mock.calls[1][1]!.body as string).threadId).toBe('tenant:tenant-1:thread-1');
+    const messages = useChatStore.getState().sessions[0].messages;
+    expect(messages[1]).toMatchObject({ agentResponse: { parts: [{ status: 'answered' }] }, agui: { status: 'completed' } });
+    expect(messages[2]).toMatchObject({ agui: { status: 'completed' }, streaming: false });
+  });
+
+  it('allows a later questionnaire on the same run after the first card has been answered', async () => {
+    restoreQuestionnaire();
+    const second = {
+      ...questionnaire(), result_id: 'result-second', source_turn_id: 'turn-second',
+      parts: questionnaire().parts.map((part) => ({ ...part, clarification_id: 'clarification-second' })),
+    };
+    mockStream((input) => frame(input, 0, 'STATE_SNAPSHOT', { snapshot: { agent_response: questionnaire(input.runId, 'answered') } })
+      + frame(input, 1, 'STATE_SNAPSHOT', { snapshot: { agent_response: second } })
+      + frame(input, 2, 'RUN_FINISHED', { outcome: { type: 'interrupt' } }), false, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+    await act(async () => { expect(await result.current.sendMessage('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-original', run_id: 'run-original',
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    })).toBe(true); });
+    expect(useChatStore.getState().sessions[0].messages[1].agui?.status).toBe('completed');
+    expect(assistant()).toMatchObject({ agentResponse: second, agui: { status: 'interrupted' } });
+    mockStream((input) => frame(input, 3, 'STATE_SNAPSHOT', { snapshot: { agent_response: {
+      ...second, parts: second.parts.map((part) => ({ ...part, status: 'answered', answers: { scope: { option_id: 'refunds' } } })),
+    } } }) + frame(input, 4, 'RUN_FINISHED'), false, undefined, 'run-original');
+    await act(async () => { expect(await result.current.sendMessage('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-second', run_id: 'run-original',
+      clarification_id: 'clarification-second', answers: { scope: { option_id: 'refunds' } },
+    })).toBe(true); });
+    expect(useChatStore.getState().sessions[0].messages[2]).toMatchObject({
+      agui: { status: 'completed' }, agentResponse: { parts: [{ status: 'answered', answers: { scope: { option_id: 'refunds' } } }] },
+    });
+    expect(apiStreamFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('guards duplicate questionnaire submissions and clears its continuation stream on a terminal failure', async () => {
+    restoreQuestionnaire();
+    const stream = mockStream((input) => frame(input, 0, 'RUN_STARTED'), true, undefined, 'run-original');
+    const { result } = renderHook(() => useAgentChat());
+    const interaction = {
+      kind: 'clarification_answer' as const, source_turn_id: 'turn-original', run_id: 'run-original',
+      clarification_id: 'clarification-1', answers: { scope: { option_id: 'sales' } },
+    };
+    let sending: Promise<unknown>;
+    await act(async () => { sending = result.current.sendMessage('', undefined, interaction); });
+    await act(async () => { expect(await result.current.sendMessage('', undefined, interaction)).toBe(false); });
+    expect(apiStreamFetch).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      stream.emit(frame({ ...inputAt(), runId: 'run-original' }, 1, 'RUN_ERROR', { message: '处理失败' }));
+      expect(await sending!).toBe(false);
+    });
+    expect(assistant()).toMatchObject({ streaming: false, stage: null, agui: { status: 'failed' } });
+    expect(stream.release).toHaveBeenCalledOnce();
+    expect(stream.locked()).toBe(false);
+    expect(result.current.canReconnectAguiRun('run-original')).toBe(false);
+  });
+
   it('uses the same AG-UI endpoint for a personal workspace', async () => {
     useAuthStore.setState({ workspaceType: 'personal', tenantId: undefined, activeWorkspaceId: undefined });
     mockStream((input) => frame(input, 0, 'RUN_STARTED') + frame(input, 1, 'RUN_FINISHED'), false, 'personal:personal-a:thread-1');

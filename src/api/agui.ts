@@ -1,6 +1,22 @@
 import { apiFetch, apiStreamFetch } from './client';
 import { readSseData } from './sse';
 import { aguiRecord, type AguiEvent, type AguiRunInput } from '../types/agui';
+import type { ClarificationAnswer } from '../types';
+
+export interface AguiClarificationInput {
+  threadId: string;
+  runId: string;
+  requestId: string;
+  clarificationId: string;
+  answers: Record<string, ClarificationAnswer>;
+}
+
+export class AguiClarificationError extends Error {
+  constructor(message: string, readonly code: string, readonly status: string, readonly httpStatus: number) {
+    super(message);
+    this.name = 'AguiClarificationError';
+  }
+}
 
 export async function fetchAguiRunResult(input: AguiRunInput, signal: AbortSignal): Promise<string> {
   const response = await apiFetch('/api/v1/agui/runs', {
@@ -20,20 +36,42 @@ export async function fetchAguiRunResult(input: AguiRunInput, signal: AbortSigna
   return result.content;
 }
 
-export async function* streamAguiRun(
+export function streamAguiRun(
   input: AguiRunInput,
   signal: AbortSignal,
   lastEventId?: string,
   onSessionId?: (sessionId: string) => void,
 ): AsyncGenerator<AguiEvent> {
-  const stream = await apiStreamFetch('/api/v1/agui/runs', {
+  return streamAguiEvents('/api/v1/agui/runs', input, input, signal, lastEventId, onSessionId);
+}
+
+export function streamAguiClarification(
+  input: AguiClarificationInput,
+  signal: AbortSignal,
+  lastEventId?: string,
+  onSessionId?: (sessionId: string) => void,
+): AsyncGenerator<AguiEvent> {
+  const { runId, ...body } = input;
+  return streamAguiEvents(`/api/v1/agui/runs/${encodeURIComponent(runId)}/clarification`, body, input, signal, lastEventId, onSessionId, true);
+}
+
+async function* streamAguiEvents(
+  endpoint: string,
+  body: object,
+  input: Pick<AguiRunInput, 'threadId' | 'runId'>,
+  signal: AbortSignal,
+  lastEventId?: string,
+  onSessionId?: (sessionId: string) => void,
+  clarification = false,
+): AsyncGenerator<AguiEvent> {
+  const stream = await apiStreamFetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
       ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
     },
-    body: JSON.stringify(input),
+    body: JSON.stringify(body),
     signal,
   });
   try {
@@ -42,6 +80,14 @@ export async function* streamAguiRun(
       const payload = response.headers.get('content-type')?.includes('application/json')
         ? aguiRecord(await response.json().catch(() => null)) : null;
       const detail = typeof payload?.detail === 'string' ? payload.detail.slice(0, 240) : '';
+      if (clarification) {
+        const structured = aguiRecord(payload?.detail);
+        throw new AguiClarificationError(
+          typeof structured?.message === 'string' ? structured.message.slice(0, 240) : detail || '问卷提交失败，请稍后重试。',
+          typeof structured?.code === 'string' ? structured.code : 'clarification_http_error',
+          typeof structured?.status === 'string' ? structured.status : '', response.status,
+        );
+      }
       if (response.status === 403) throw new Error(detail || '无权访问当前工作空间，请切换到有权限的空间。');
       throw new Error(detail || `新对话请求失败（HTTP ${response.status}），请稍后重试。`);
     }

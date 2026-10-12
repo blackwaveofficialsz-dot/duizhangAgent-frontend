@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { notification } from 'antd';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +16,26 @@ function response(overrides: Partial<AgentResponsePayload> = {}): AgentResponseP
     parts: [],
     ...overrides,
   };
+}
+
+function questionnaireResponse(part: Record<string, unknown> = {}) {
+  return response({
+    result_status: 'needs_confirmation',
+    parts: [{
+      kind: 'questionnaire', clarification_id: 'clarify-1', run_id: 'run-1',
+      status: 'pending', expires_at: '2099-01-01T12:00:00',
+      questions: [
+        { id: 'scope', header: '范围', question: '统计哪些门店？', allow_free_text: true, options: [
+          { id: 'all', label: '全部门店', description: '汇总全部已授权门店', recommended: true },
+          { id: 'one', label: '指定门店' },
+        ] },
+        { id: 'view', header: '展示', question: '按什么维度展示？', allow_free_text: true, options: [
+          { id: 'day', label: '按天' }, { id: 'platform', label: '按平台' },
+        ] },
+      ],
+      ...part,
+    }] as AgentResponsePayload['parts'],
+  });
 }
 
 const originalMatchMedia = window.matchMedia;
@@ -39,6 +59,7 @@ function setMobileViewport(matches: boolean) {
 
 describe('ResponsePartsRenderer', () => {
   afterEach(() => {
+    vi.useRealTimers();
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       writable: true,
@@ -507,5 +528,131 @@ describe('ResponsePartsRenderer', () => {
       duration: 5,
       closable: true,
     });
+  });
+
+  it('requires every questionnaire answer and sends one interaction without selecting the recommendation', async () => {
+    const onInteraction = vi.fn().mockResolvedValue(undefined);
+    render(<ResponsePartsRenderer response={questionnaireResponse()} onInteraction={onInteraction} promptDisabled />);
+
+    expect(screen.getByText('推荐')).toBeTruthy();
+    expect(screen.getByText('汇总全部已授权门店')).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '提交答案' });
+    expect(submit).toHaveProperty('disabled', true);
+    expect(screen.getAllByRole('radio').every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: /全部门店/ }));
+    expect(submit).toHaveProperty('disabled', true);
+    expect(onInteraction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('radio', { name: '按平台' }));
+    fireEvent.click(submit);
+    await waitFor(() => expect(onInteraction).toHaveBeenCalledWith({
+      kind: 'clarification_answer', source_turn_id: 'turn-1', run_id: 'run-1', clarification_id: 'clarify-1',
+      answers: { scope: { option_id: 'all' }, view: { option_id: 'platform' } },
+    }));
+    expect(onInteraction).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: '提交答案' })).toBeNull();
+  });
+
+  it('submits a trimmed other answer and a pure text question together', async () => {
+    const onInteraction = vi.fn().mockResolvedValue(undefined);
+    render(<ResponsePartsRenderer response={questionnaireResponse({ questions: [
+      { id: 'scope', header: '范围', question: '统计哪些门店？', allow_free_text: true, options: [
+        { id: 'all', label: '全部门店' }, { id: 'one', label: '指定门店' },
+      ] },
+      { id: 'detail', header: '说明', question: '补充展示要求', options: [] },
+    ] })} onInteraction={onInteraction} />);
+
+    fireEvent.click(within(screen.getByRole('group', { name: '统计哪些门店？' })).getByRole('radio', { name: '其他' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '统计哪些门店？：其他' }), { target: { value: '   ' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '补充展示要求' }), { target: { value: '  展示同比  ' } });
+    expect(screen.getByRole('button', { name: '提交答案' })).toHaveProperty('disabled', true);
+    fireEvent.change(screen.getByRole('textbox', { name: '统计哪些门店？：其他' }), { target: { value: '  北京门店  ' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交答案' }));
+    await waitFor(() => expect(onInteraction).toHaveBeenCalledWith(expect.objectContaining({
+      answers: { scope: { text: '北京门店' }, detail: { text: '展示同比' } },
+    })));
+  });
+
+  it('sets the browser text limit and submits a complete answer at the 2000 character boundary', async () => {
+    const onInteraction = vi.fn().mockResolvedValue(undefined);
+    render(<ResponsePartsRenderer response={questionnaireResponse({ questions: [
+      { id: 'detail', header: '说明', question: '补充展示要求', options: [] },
+    ] })} onInteraction={onInteraction} />);
+    const textarea = screen.getByRole('textbox', { name: '补充展示要求' });
+    expect(textarea).toHaveProperty('maxLength', 2000);
+    const text = '展'.repeat(2000);
+    fireEvent.change(textarea, { target: { value: text } });
+    const submit = screen.getByRole('button', { name: '提交答案' });
+    expect(submit).toHaveProperty('disabled', false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(onInteraction).toHaveBeenCalledWith(expect.objectContaining({ answers: { detail: { text } } })));
+  });
+
+  it('blocks duplicate submissions while pending and restores draft answers after failure', async () => {
+    let rejectSend!: (reason?: unknown) => void;
+    const onInteraction = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject; }));
+    const notificationError = vi.fn();
+    vi.spyOn(notification, 'useNotification').mockReturnValue([{ error: notificationError }, null] as never);
+    render(<ResponsePartsRenderer response={questionnaireResponse()} onInteraction={onInteraction} />);
+    fireEvent.click(screen.getByRole('radio', { name: /全部门店/ }));
+    fireEvent.click(screen.getByRole('radio', { name: '按天' }));
+    const submit = screen.getByRole('button', { name: '提交答案' });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(onInteraction).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveProperty('disabled', true);
+    rejectSend(new Error('network failed'));
+    await waitFor(() => expect(submit).toHaveProperty('disabled', false));
+    expect(screen.getByRole('radio', { name: '按天' })).toHaveProperty('checked', true);
+    expect(notificationError).toHaveBeenCalledWith({ title: '提交答案失败', duration: 5, closable: true });
+  });
+
+  it('renders historical answers without editable inputs or a submit button', () => {
+    render(<ResponsePartsRenderer response={questionnaireResponse({
+      status: 'answered', answers: { scope: { option_id: 'all' }, view: { text: '按小时展示' } },
+    })} onInteraction={vi.fn()} />);
+    expect(screen.getByText('已回答')).toBeTruthy();
+    expect(screen.getByText('全部门店')).toBeTruthy();
+    expect(screen.getByText('按小时展示')).toBeTruthy();
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: '提交答案' })).toBeNull();
+  });
+
+  it.each(['answered', 'expired', 'cancelled'])('removes the confirmation badge from a %s questionnaire', (status) => {
+    render(<ResponsePartsRenderer response={questionnaireResponse({
+      status, ...(status === 'answered' ? { answers: { scope: { option_id: 'all' }, view: { option_id: 'day' } } } : {}),
+    })} />);
+    expect(screen.queryByText('需要确认')).toBeNull();
+  });
+
+  it('keeps the confirmation badge while another questionnaire is pending', () => {
+    const pending = questionnaireResponse();
+    render(<ResponsePartsRenderer response={response({ result_status: 'needs_confirmation', parts: [
+      ...pending.parts, { ...pending.parts[0], clarification_id: 'clarify-answered', status: 'answered',
+        answers: { scope: { option_id: 'all' }, view: { option_id: 'day' } } },
+    ] })} />);
+    expect(screen.getByText('需要确认')).toBeTruthy();
+  });
+
+  it('expires a pending questionnaire using Beijing time and cleans its expiry timer on unmount', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-11T02:00:00Z'));
+    const onInteraction = vi.fn();
+    const { unmount } = render(<ResponsePartsRenderer response={questionnaireResponse({ expires_at: '2026-10-11T10:00:01' })} onInteraction={onInteraction} />);
+    fireEvent.click(screen.getByRole('radio', { name: /全部门店/ }));
+    fireEvent.click(screen.getByRole('radio', { name: '按天' }));
+    expect(screen.getByRole('button', { name: '提交答案' })).toHaveProperty('disabled', false);
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(screen.getByText('已过期')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '提交答案' })).toBeNull();
+    expect(onInteraction).not.toHaveBeenCalled();
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('disables questionnaire submission independently while another stream is busy', () => {
+    render(<ResponsePartsRenderer response={questionnaireResponse()} onInteraction={vi.fn()} questionnaireDisabled />);
+    expect(screen.getAllByRole('radio').every((radio) => (radio as HTMLInputElement).disabled)).toBe(true);
+    expect(screen.getByRole('button', { name: '提交答案' })).toHaveProperty('disabled', true);
   });
 });

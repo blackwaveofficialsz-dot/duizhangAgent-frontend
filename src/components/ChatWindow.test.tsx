@@ -14,6 +14,7 @@ const componentMocks = vi.hoisted(() => ({
   cancelResearchRun: vi.fn(),
   reconnectAguiRun: vi.fn(),
   cancelAguiRun: vi.fn(),
+  canReconnectAguiRun: vi.fn(() => true),
   decideAguiApproval: vi.fn(),
   taskCardProps: vi.fn(),
   notificationSuccess: vi.fn(),
@@ -41,7 +42,7 @@ vi.mock('../hooks/useAgentChat', () => ({
     reconnectAguiRun: componentMocks.reconnectAguiRun,
     cancelAguiRun: componentMocks.cancelAguiRun,
     decideAguiApproval: componentMocks.decideAguiApproval,
-    canReconnectAguiRun: () => true,
+    canReconnectAguiRun: componentMocks.canReconnectAguiRun,
   }),
 }));
 vi.mock('./MessageBubble', () => ({
@@ -144,6 +145,7 @@ describe('ChatWindow streaming performance', () => {
     vi.clearAllMocks();
     componentMocks.sendMessage.mockResolvedValue(true);
     componentMocks.decideAguiApproval.mockResolvedValue(true);
+    componentMocks.canReconnectAguiRun.mockReturnValue(true);
     vi.spyOn(useTaskStore.getState(), 'startPolling').mockImplementation(() => undefined);
     vi.spyOn(useTaskStore.getState(), 'stopPolling').mockImplementation(() => undefined);
     useAuthStore.setState({ role: 'member', workspaceType: 'tenant' });
@@ -703,6 +705,67 @@ describe('ChatWindow streaming performance', () => {
       kind: 'clarification_choice',
       source_turn_id: 'turn-1',
       candidate_id: 'analytics:sales_summary',
+    });
+  });
+
+  it.each(['completed', 'failed', 'cancelled'] as const)('skips reconnect eligibility scans for %s historical runs', (status) => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    useChatStore.setState({
+      sessions: [{ id: 'session-1', title: '历史会话', createdAt: 0, conversationMode: 'agui', messages: [{
+        id: 'assistant-history', role: 'assistant', content: '历史回复', agui: { runId: 'run-history', status },
+      }] }], activeSessionId: 'session-1',
+    });
+
+    render(<ChatWindow />);
+
+    expect(componentMocks.canReconnectAguiRun).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '重连原任务' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '停止本轮' })).toBeNull();
+  });
+
+  it('keeps disconnected historical runs reconnectable after checking eligibility', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    useChatStore.setState({
+      sessions: [{ id: 'session-1', title: '历史会话', createdAt: 0, conversationMode: 'agui', messages: [{
+        id: 'assistant-history', role: 'assistant', content: '历史回复', agui: { runId: 'run-history', status: 'disconnected' },
+      }] }], activeSessionId: 'session-1',
+    });
+
+    render(<ChatWindow />);
+
+    expect(componentMocks.canReconnectAguiRun).toHaveBeenCalledWith('run-history');
+    expect(screen.getByRole('button', { name: '重连原任务' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重连原任务' }));
+    expect(componentMocks.reconnectAguiRun).toHaveBeenCalledWith('run-history');
+  });
+
+  it('submits an interrupted questionnaire through the original-run interaction', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    useChatStore.setState({
+      sessions: [{ id: 'session-1', title: '订单分析', createdAt: 0, conversationMode: 'agui', messages: [{
+        id: 'assistant-questionnaire', role: 'assistant', content: '请确认范围',
+        agui: { runId: 'run-1', status: 'interrupted' }, agentResponse: {
+          version: 1, domain: 'platform', task: 'clarification', result_status: 'needs_confirmation',
+          result_id: 'result-1', source_turn_id: 'turn-1', parts: [{
+            kind: 'questionnaire', clarification_id: 'clarification-1', run_id: 'run-1', status: 'pending',
+            expires_at: '2099-10-11T10:00:00+08:00', questions: [{
+              id: 'scope', header: '数据范围', question: '查看哪类订单？', options: [
+                { id: 'sales', label: '经营订单', recommended: true }, { id: 'refunds', label: '退款订单' },
+              ],
+            }],
+          }],
+        },
+      }] }], activeSessionId: 'session-1',
+    });
+    componentMocks.canReconnectAguiRun.mockReturnValue(false);
+    render(<ChatWindow />);
+    expect(screen.getByRole('button', { name: '停止本轮' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: /经营订单/ }));
+    fireEvent.click(screen.getByRole('button', { name: '提交答案' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(componentMocks.sendMessage).toHaveBeenCalledWith('', undefined, {
+      kind: 'clarification_answer', source_turn_id: 'turn-1', run_id: 'run-1', clarification_id: 'clarification-1',
+      answers: { scope: { option_id: 'sales' } },
     });
   });
 

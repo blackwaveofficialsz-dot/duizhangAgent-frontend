@@ -1,12 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { notification } from 'antd';
-import { fetchAguiRunResult, streamAguiRun } from '../api/agui';
+import { AguiClarificationError, fetchAguiRunResult, streamAguiRun, streamAguiClarification, type AguiClarificationInput } from '../api/agui';
 import { approveAgentRun, cancelAgentRun, type AgentRunApprovalDecision } from '../api/agentRuns';
 import { registerSessionCleanup } from '../api/sessionLifecycle';
 import { useChatStore } from '../store/chatStore';
-import { parseAgentActivity, parseAgentResponsePayload, type ChatInteraction } from '../types';
+import { isQuestionnairePart, parseAgentActivity, parseAgentResponsePayload, type ChatInteraction } from '../types';
 import { aguiRecord, isAguiEnabled, isAguiUnresolved, type AguiApproval, type AguiEvent, type AguiRunInput, type AguiStatus } from '../types/agui';
 import { createId } from '../utils/id';
+import { parseBeijingTime } from '../utils/time';
 
 interface RunContext {
   input: AguiRunInput;
@@ -21,6 +22,8 @@ interface RunContext {
   approval?: AguiApproval;
   approvalRequestIds?: Partial<Record<AgentRunApprovalDecision, string>>;
   decidingApproval?: boolean;
+  clarification?: AguiClarificationInput;
+  questionnaireMessageId?: string;
 }
 
 // 未结束请求只保留在当前页面；刷新后从会话历史恢复，页面内断线使用事件游标续传。
@@ -40,7 +43,20 @@ export function useAguiChat() {
     });
   }
 
-  function finish(run: RunContext, status: AguiStatus, detail?: string, retryable?: boolean) {
+  function setQuestionnaireStatus(run: RunContext, status: 'expired' | 'cancelled') {
+    const store = useChatStore.getState();
+    const session = store.sessions.find((item) => item.id === run.input.threadId);
+    for (const message of session?.messages ?? []) {
+      const response = message.agentResponse;
+      if (!response?.parts.some((part) => isQuestionnairePart(part) && part.run_id === run.input.runId && part.status === 'pending')) continue;
+      store.setMessageAgentResponse(session!.id, message.id, {
+        ...response, parts: response.parts.map((part) => isQuestionnairePart(part)
+          && part.run_id === run.input.runId && part.status === 'pending' ? { ...part, status } : part),
+      });
+    }
+  }
+
+  function finish(run: RunContext, status: AguiStatus, detail?: string, retryable?: boolean, finishQuestionnaire = true) {
     const store = useChatStore.getState();
     setStatus(run, status, detail, retryable);
     store.setMessageStreaming(run.input.threadId, run.messageId, false);
@@ -49,6 +65,14 @@ export function useAguiChat() {
     store.finishMessageActivity(run.input.threadId, run.messageId,
       status === 'completed' ? (resultStatus && resultStatus !== 'ok' ? resultStatus : 'completed')
         : status === 'failed' || status === 'cancelled' ? status : 'interrupted');
+    if (status === 'cancelled') setQuestionnaireStatus(run, 'cancelled');
+    if (finishQuestionnaire && run.questionnaireMessageId && !isAguiUnresolved(status)) {
+      const original = store.sessions.find((session) => session.id === run.input.threadId)?.messages
+        .find((message) => message.id === run.questionnaireMessageId);
+      if (original?.agui && original.agui.status !== 'completed') {
+        store.setMessageAgui(run.input.threadId, original.id, { ...original.agui, status });
+      }
+    }
   }
 
   useEffect(() => {
@@ -121,7 +145,27 @@ export function useAguiChat() {
       case 'STATE_SNAPSHOT': {
         const snapshot = aguiRecord(event.snapshot);
         const response = parseAgentResponsePayload(snapshot?.agent_response);
-        if (response) store.setMessageAgentResponse(threadId, messageId, response);
+        if (response) {
+          const answered = response.parts.filter((part) => isQuestionnairePart(part)
+            && part.status === 'answered' && part.run_id === run.input.runId
+            && part.clarification_id === run.clarification?.clarificationId);
+          const original = store.sessions.find((session) => session.id === threadId)?.messages
+            .find((message) => message.id === run.questionnaireMessageId);
+          if (answered.length && original?.agentResponse) {
+            store.setMessageAgentResponse(threadId, original.id, {
+              ...original.agentResponse,
+              parts: original.agentResponse.parts.map((part) => answered.find((answer) =>
+                isQuestionnairePart(part) && isQuestionnairePart(answer)
+                && part.run_id === answer.run_id && part.clarification_id === answer.clarification_id) ?? part),
+            });
+            if (original.agui) store.setMessageAgui(threadId, original.id, { ...original.agui, status: 'completed' });
+            setStatus(run, 'running');
+          }
+          const parts = response.parts.filter((part) => !answered.includes(part));
+          if (!answered.length || parts.length || response.content) {
+            store.setMessageAgentResponse(threadId, messageId, { ...response, parts });
+          }
+        }
         const activity = parseAgentActivity(snapshot?.agent_activity);
         if (activity) store.setMessageActivity(threadId, messageId, activity);
         const approval = aguiRecord(snapshot?.approval);
@@ -170,7 +214,11 @@ export function useAguiChat() {
     setStatus(run, 'connecting');
     let terminal = false;
     try {
-      for await (const event of streamAguiRun(run.input, controller.signal, run.lastEventId, (id) => { run.canonicalSessionId = id; })) {
+      const onSessionId = (id: string) => { run.canonicalSessionId = id; };
+      const stream = run.clarification
+        ? streamAguiClarification(run.clarification, controller.signal, run.lastEventId, onSessionId)
+        : streamAguiRun(run.input, controller.signal, run.lastEventId, onSessionId);
+      for await (const event of stream) {
         if (controller.signal.aborted || runs.current.get(run.input.runId) !== run) break;
         if (run.seen.has(event.eventId)) continue;
         terminal = apply(run, event);
@@ -180,7 +228,7 @@ export function useAguiChat() {
         if (terminal) break;
       }
       if (!terminal && !controller.signal.aborted) throw new Error('连接中断，尚未收到本轮结束事件。可重连原任务，请勿重复提交。');
-      if (terminal && messageFor(run)?.agui?.status === 'completed') {
+      if (terminal && !run.clarification && messageFor(run)?.agui?.status === 'completed') {
         try {
           const content = await fetchAguiRunResult(run.input, controller.signal);
           if (!controller.signal.aborted && runs.current.get(run.input.runId) === run && messageFor(run)?.content !== content) {
@@ -200,6 +248,16 @@ export function useAguiChat() {
     } catch (error) {
       if (controller.signal.aborted) return null;
       const detail = error instanceof Error ? error.message : '接收回复失败，请稍后重连。';
+      if (error instanceof AguiClarificationError && error.httpStatus < 500 && error.httpStatus !== 429) {
+        const ended = ['clarification_expired', 'clarification_cancelled', 'clarification_run_failed'].includes(error.code)
+          || error.httpStatus === 404;
+        if (error.code === 'clarification_expired') setQuestionnaireStatus(run, 'expired');
+        finish(run, error.code === 'clarification_cancelled' ? 'cancelled' : 'failed', detail, false, ended);
+        if (useChatStore.getState().activeSessionId === run.input.threadId) {
+          notification.error({ title: '问卷提交失败', description: detail, duration: 5, closable: true });
+        }
+        return false;
+      }
       finish(run, 'disconnected', detail);
       if (useChatStore.getState().activeSessionId === run.input.threadId) {
         notification.error({ message: '新对话接收中断', description: detail, duration: 5, closable: true });
@@ -213,11 +271,14 @@ export function useAguiChat() {
       if (status && !isAguiUnresolved(status)) runs.current.delete(run.input.runId);
       if (terminal && run.canonicalSessionId && run.canonicalSessionId !== run.input.threadId) {
         useChatStore.getState().updateSessionId(run.input.threadId, run.canonicalSessionId);
+        run.input = { ...run.input, threadId: run.canonicalSessionId };
+        if (run.clarification) run.clarification = { ...run.clarification, threadId: run.canonicalSessionId };
       }
     }
   }
 
   async function sendMessage(text: string, interaction?: ChatInteraction): Promise<boolean | null> {
+    if (interaction?.kind === 'clarification_answer') return answerQuestionnaire(interaction);
     if (!isAguiEnabled() || !text.trim()) return false;
     const store = useChatStore.getState();
     const session = store.sessions.find((item) => item.id === store.activeSessionId);
@@ -241,15 +302,85 @@ export function useAguiChat() {
     return consume(run);
   }
 
+  async function answerQuestionnaire(interaction: Extract<ChatInteraction, { kind: 'clarification_answer' }>): Promise<boolean | null> {
+    if (!isAguiEnabled()) return false;
+    const store = useChatStore.getState();
+    const session = store.sessions.find((item) => item.id === store.activeSessionId);
+    if (!session || session.conversationMode !== 'agui') return false;
+    const original = session.messages.find((message) => message.agentResponse?.source_turn_id === interaction.source_turn_id
+      && message.agentResponse.parts.some((part) => isQuestionnairePart(part)
+        && part.run_id === interaction.run_id && part.clarification_id === interaction.clarification_id
+        && part.status === 'pending' && parseBeijingTime(part.expires_at) > Date.now()));
+    const previous = runs.current.get(interaction.run_id);
+    if (!original || previous?.controller || previous?.cancelling
+      || session.messages.some((message) => message.id !== original.id && message.agui && isAguiUnresolved(message.agui.status))) return false;
+    const part = original.agentResponse!.parts.find((item) => isQuestionnairePart(item)
+      && item.run_id === interaction.run_id && item.clarification_id === interaction.clarification_id)!;
+    if (!parseAgentResponsePayload({
+      ...original.agentResponse, parts: [{ ...part, status: 'answered', answers: interaction.answers }],
+    })) return false;
+    const messageId = createId();
+    const run: RunContext = {
+      input: previous?.input ?? {
+        threadId: session.id, runId: interaction.run_id, parentRunId: null, state: {}, messages: [],
+        tools: [], context: [], forwardedProps: {},
+      },
+      messageId, seen: previous?.seen ?? new Set(), lastEventId: previous?.lastEventId,
+      questionnaireMessageId: original.id,
+      clarification: {
+        threadId: session.id, runId: interaction.run_id, requestId: createId(),
+        clarificationId: interaction.clarification_id, answers: interaction.answers,
+      },
+    };
+    runs.current.set(interaction.run_id, run);
+    store.addMessage(session.id, { id: messageId, role: 'assistant', content: '', streaming: true, createdAt: Date.now() });
+    return consume(run);
+  }
+
+  function restorableQuestionnaire(runId: string) {
+    const store = useChatStore.getState();
+    const session = store.sessions.find((item) => item.id === store.activeSessionId && item.conversationMode === 'agui');
+    for (const original of session?.messages ?? []) {
+      if (original.role !== 'assistant' || original.agui?.runId !== runId) continue;
+      const part = original.agentResponse?.parts.filter(isQuestionnairePart).find((item) => item.run_id === runId
+        && (item.status === 'pending' || item.status === 'expired'
+          || (item.status === 'answered' && original.agui?.status === 'disconnected')));
+      if (part) return { session: session!, original, part };
+    }
+  }
+
+  function restoreRun(runId: string): RunContext | undefined {
+    const restored = restorableQuestionnaire(runId);
+    if (!restored) return;
+    const { session, original, part } = restored;
+    const run: RunContext = {
+      input: { threadId: session.id, runId, parentRunId: null, state: {}, messages: [], tools: [], context: [], forwardedProps: {} },
+      messageId: original.id, seen: new Set(), questionnaireMessageId: original.id,
+      ...(part.status === 'answered' && part.answers ? {
+        clarification: { threadId: session.id, runId, requestId: createId(),
+          clarificationId: part.clarification_id, answers: part.answers },
+      } : {}),
+    };
+    runs.current.set(runId, run);
+    return run;
+  }
+
   function reconnect(runId: string) {
-    const run = runs.current.get(runId);
+    const run = runs.current.get(runId)
+      ?? (restorableQuestionnaire(runId)?.part.status === 'answered' ? restoreRun(runId) : undefined);
     if (!run || run.cancelling || messageFor(run)?.agui?.status !== 'disconnected'
       || useChatStore.getState().activeSessionId !== run.input.threadId) return Promise.resolve(false);
+    if (run.clarification && run.messageId === run.questionnaireMessageId) {
+      run.messageId = createId();
+      useChatStore.getState().addMessage(run.input.threadId, {
+        id: run.messageId, role: 'assistant', content: '', streaming: true, createdAt: Date.now(),
+      });
+    }
     return consume(run);
   }
 
   async function cancel(runId: string) {
-    const run = runs.current.get(runId);
+    const run = runs.current.get(runId) ?? restoreRun(runId);
     if (!run || run.cancelling) return;
     run.cancelling = true;
     run.cancelRequestId ??= createId();
@@ -292,5 +423,6 @@ export function useAguiChat() {
     }
   }
 
-  return { sendMessage, reconnect, cancel, decideApproval, canReconnect: (runId: string) => runs.current.has(runId) };
+  return { sendMessage, reconnect, cancel, decideApproval,
+    canReconnect: (runId: string) => runs.current.has(runId) || restorableQuestionnaire(runId)?.part.status === 'answered' };
 }

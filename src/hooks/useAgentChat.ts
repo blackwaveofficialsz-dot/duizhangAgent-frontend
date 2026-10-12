@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { notification } from 'antd';
 import { apiFetch } from '../api/client';
 import { cancelAgentRun, type AgentRunCommandResult } from '../api/agentRuns';
 import { getQueryEvidence } from '../api/connectors';
@@ -222,6 +223,10 @@ export function useAgentChat(options: AgentChatOptions = {}) {
     const activeSession = useChatStore.getState().sessions.find((s) => s.id === localSessionId);
     if (activeSession?.conversationMode === 'agui' && !files?.files.length) {
       return agui.sendMessage(text, interaction);
+    }
+    if (interaction?.kind === 'clarification_answer') {
+      notification.error({ title: '无法提交问卷', description: '请在新对话模式中提交问卷答案。', duration: 5, closable: true });
+      return false;
     }
     const backendSessionId = activeSession?.pending ? '' : localSessionId;
 
