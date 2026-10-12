@@ -7,6 +7,7 @@ import {
 } from '../api/sessionLifecycle';
 import { apiUrl } from '../api/url';
 import {
+  acceptWorkspaceInvite as requestAcceptWorkspaceInvite,
   getAccountState,
   getWorkspaces,
   loginWithCode as requestCodeLogin,
@@ -44,6 +45,7 @@ interface AuthState {
   registerPersonal: (verificationToken: string) => Promise<void>;
   resetPassword: (verificationToken: string, newPassword: string) => Promise<void>;
   setInitialPassword: (newPassword: string) => Promise<void>;
+  acceptWorkspaceInvite: (inviteToken: string) => Promise<string>;
   refreshAuth: (response: AuthResponse) => void;
   joinTenant: (tenantCode: string) => Promise<string>;
   loadWorkspaceState: () => Promise<void>;
@@ -172,6 +174,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!token) throw new Error('登录已过期，请重新登录');
     const result = await setInitialAccountPassword(newPassword, token);
     set({ hasPassword: result.has_password });
+  },
+
+  acceptWorkspaceInvite: async (inviteToken) => {
+    const token = get().token;
+    if (!token) throw new Error('登录已过期，请重新登录');
+    const result = await requestAcceptWorkspaceInvite(inviteToken, token);
+    set((state) => {
+      const exists = state.workspaces.some(
+        (workspace) => workspace.workspace_id === result.workspace.workspace_id,
+      );
+      return {
+        workspaces: exists
+          ? state.workspaces.map((workspace) => (
+            workspace.workspace_id === result.workspace.workspace_id
+              ? result.workspace
+              : workspace
+          ))
+          : [...state.workspaces, result.workspace],
+      };
+    });
+    return result.message;
   },
 
   refreshAuth: (response) => {

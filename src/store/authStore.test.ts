@@ -5,6 +5,7 @@ import { useChatStore } from './chatStore';
 import { useTaskStore } from './taskStore';
 
 const apiMocks = vi.hoisted(() => ({
+  acceptWorkspaceInvite: vi.fn(),
   loginWithPassword: vi.fn(),
   loginWithCode: vi.fn(),
   registerAccount: vi.fn(),
@@ -223,5 +224,35 @@ describe('authStore new authentication actions', () => {
       token: 'tenant-a-token', tenantId: 'tenant-a', activeWorkspaceId: 'tenant-a', switchingWorkspaceId: null,
     });
     expect(useChatStore.getState()).toMatchObject({ activeSessionId: 'session-a' });
+  });
+
+  it('adds an accepted invitation to the workspace list without switching the current workspace', async () => {
+    useAuthStore.setState({
+      token: 'personal-token', tenantId: null, workspaceType: 'personal', activeWorkspaceId: 'personal',
+      workspaces: [{
+        workspace_id: 'personal', workspace_type: 'personal', name: '个人空间',
+        tenant_id: null, role: 'personal', is_active: true,
+      }],
+      isLoggedIn: true,
+    });
+    apiMocks.acceptWorkspaceInvite.mockResolvedValue({
+      workspace: {
+        workspace_id: 'tenant-b', workspace_type: 'tenant', name: '租户 B',
+        tenant_id: 'tenant-b', role: 'member', is_active: false,
+      },
+      message: '已加入租户 B，可在工作空间列表中切换',
+    });
+
+    const message = await useAuthStore.getState().acceptWorkspaceInvite('Ab12Mixed');
+
+    expect(apiMocks.acceptWorkspaceInvite).toHaveBeenCalledWith('Ab12Mixed', 'personal-token');
+    expect(message).toBe('已加入租户 B，可在工作空间列表中切换');
+    expect(useAuthStore.getState()).toMatchObject({
+      activeWorkspaceId: 'personal',
+      workspaces: [
+        expect.objectContaining({ workspace_id: 'personal', is_active: true }),
+        expect.objectContaining({ workspace_id: 'tenant-b', is_active: false }),
+      ],
+    });
   });
 });

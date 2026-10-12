@@ -1,3 +1,4 @@
+import { getMyStoreAccess } from './storeAccess';
 // 经营分析 API（P1：订单统计 / 店铺映射 / 平台字典）。
 
 import { apiFetch } from './client';
@@ -52,7 +53,7 @@ function appendTrendOptions(params: URLSearchParams, options: TrendRequestOption
   params.set('include_current', String(!!options.includeCurrent));
 }
 
-const ANALYTICS_CACHE_PREFIX = 'analytics-api-cache-v1';
+const ANALYTICS_CACHE_PREFIX = 'analytics-api-cache-v2';
 const DEFAULT_ANALYTICS_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const LOCAL_STORAGE_CACHE_MAX_CHARS = 200_000;
 const LOCAL_STORAGE_DAILY_BUCKET_MAX_CHARS = 50_000;
@@ -110,13 +111,21 @@ function currentTenantId(): string {
   }
 }
 
+function currentUserId(): string {
+  try {
+    return localStorage.getItem('auth_user_id') || 'anonymous';
+  } catch {
+    return 'anonymous';
+  }
+}
+
 function todayKey(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function analyticsCacheKey(namespace: string, cacheKey: string): string {
-  return `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:${namespace}:${cacheKey}`;
+  return `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:${currentUserId()}:${namespace}:${cacheKey}`;
 }
 
 function analyticsCacheDateFromKey(key: string): string | null {
@@ -150,7 +159,7 @@ function isFreshEntry<T>(entry: AnalyticsFrontendCacheEntry<T>): boolean {
 
 function clearLocalAnalyticsCache(namespace?: string, cacheKey?: string): void {
   try {
-    const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:`;
+    const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:${currentUserId()}:`;
     const prefix = namespace ? `${tenantPrefix}${namespace}:` : tenantPrefix;
     const exactKey = namespace && cacheKey ? analyticsCacheKey(namespace, cacheKey) : null;
     for (let index = localStorage.length - 1; index >= 0; index -= 1) {
@@ -238,7 +247,7 @@ async function deleteIndexedAnalyticsKey(storageKey: string): Promise<void> {
 async function clearIndexedAnalyticsCache(namespace?: string, cacheKey?: string): Promise<void> {
   const db = await openIndexedCacheDb();
   if (!db) return;
-  const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:`;
+  const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:${currentUserId()}:`;
   const prefix = namespace ? `${tenantPrefix}${namespace}:` : tenantPrefix;
   const exactKey = namespace && cacheKey ? analyticsCacheKey(namespace, cacheKey) : null;
   try {
@@ -491,6 +500,8 @@ async function cachedJson<T>(url: string, options: AnalyticsRequestOptions = {})
   const cacheKey = options.cacheKey || url;
   const namespace = options.namespace || 'analytics.general';
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_ANALYTICS_CACHE_TTL_SECONDS;
+  const access = await getMyStoreAccess(options.signal);
+  if (!access.all_stores) return json<T>(await apiFetch(url, { signal: options.signal }));
   const bypassClientCache = options.forceRefresh || options.revalidate;
   if (bypassClientCache) {
     await clearAnalyticsCacheAsync(namespace, cacheKey, true);

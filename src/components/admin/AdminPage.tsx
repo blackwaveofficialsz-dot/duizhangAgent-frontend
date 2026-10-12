@@ -3,6 +3,7 @@ import { Button, Table, type TableColumnsType } from 'antd';
 import { useUiStore } from '../../store/uiStore';
 import { listTenants } from '../../api/admin';
 import type { AdminTenant } from '../../types';
+import { StoreAccessManagement } from './StoreAccessManagement';
 import { UserManagement } from './UserManagement';
 import { JoinRequestsPanel } from './JoinRequestsPanel';
 import { ConnectorsPage } from '../ConnectorsPage';
@@ -16,21 +17,28 @@ export function AdminPage() {
   const { route, navigate } = useUiStore();
   const [tenants, setTenants] = useState<AdminTenant[]>([]);
 
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [notice, setNotice] = useState<FloatingNoticeState | null>(null);
+  const refresh = () => setRefreshKey((value) => value + 1);
+
   useEffect(() => {
-    listTenants({})
-      .then(data => setTenants(Array.isArray(data.tenants) ? data.tenants : []))
-      .catch(() => setTenants([]));
-  }, []);
+    const controller = new AbortController();
+    listTenants({}, controller.signal)
+      .then(data => { if (!controller.signal.aborted) setTenants(Array.isArray(data.tenants) ? data.tenants : []); })
+      .catch((error) => { if (!controller.signal.aborted) setNotice({ message: error.message || '加载概览失败', variant: 'error' }); });
+    return () => controller.abort();
+  }, [refreshKey]);
 
   const tabs: { key: AdminTab; label: string; routePath: string }[] = [
     { key: 'stats', label: '概览', routePath: 'admin' },
-    { key: 'users', label: '用户管理', routePath: 'admin-users' },
+    { key: 'users', label: '成员与权限', routePath: 'admin-users' },
     { key: 'connectors', label: '连接器设置', routePath: 'admin-connectors' },
     { key: 'automation', label: '自动化与消息', routePath: 'admin-automation' },
   ];
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+      {notice && <FloatingNotice notice={notice} onClose={() => setNotice(null)} />}
       <div className="bg-white border-b border-slate-200 px-3 py-3 md:px-6 md:py-4">
         <h1 className="text-lg font-semibold text-slate-800">管理后台</h1>
         <div className="mt-3 flex w-full gap-1 overflow-x-auto rounded-lg bg-slate-100 p-0.5 md:w-fit">
@@ -54,8 +62,9 @@ export function AdminPage() {
         {route === 'admin' && <OverviewStats tenants={tenants} />}
         {route === 'admin-users' && (
           <div className="space-y-6">
-            <JoinRequestsPanel />
-            <UserManagement tenants={tenants} />
+            <JoinRequestsPanel onApproved={refresh} />
+            <UserManagement tenants={tenants} refreshKey={refreshKey} onMembersChanged={refresh} />
+            <StoreAccessManagement refreshKey={refreshKey} />
           </div>
         )}
         {route === 'admin-connectors' && <ConnectorsPage />}

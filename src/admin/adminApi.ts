@@ -270,13 +270,13 @@ export async function listPlatformTenants(q: {
   search?: string;
   limit?: number;
   offset?: number;
-} = {}): Promise<{ tenants: AdminTenant[]; total: number }> {
+} = {}, signal?: AbortSignal): Promise<{ tenants: AdminTenant[]; total: number }> {
   const params = new URLSearchParams();
   Object.entries(q).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
   });
   const qs = params.toString();
-  const res = await platformFetch(`/api/v1/platform/tenants${qs ? `?${qs}` : ''}`);
+  const res = await platformFetch(`/api/v1/platform/tenants${qs ? `?${qs}` : ''}`, { signal });
   return res.json();
 }
 
@@ -313,8 +313,29 @@ export async function regeneratePlatformTenantCode(id: string): Promise<AdminTen
   return res.json();
 }
 
-export async function deletePlatformTenant(id: string): Promise<void> {
-  await platformFetch(`/api/v1/platform/tenants/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export interface TenantDeletionJob {
+  job_id: string;
+  tenant_id: string;
+  status: string;
+  purge_queued: boolean;
+  last_error?: string | null;
+}
+
+export async function disablePlatformTenant(id: string): Promise<TenantDeletionJob> {
+  const res = await platformFetch(`/api/v1/platform/tenants/${encodeURIComponent(id)}/disable`, { method: 'POST' });
+  return res.json();
+}
+
+export async function getPlatformTenantDeletionJob(id: string, signal?: AbortSignal): Promise<TenantDeletionJob | null> {
+  const res = await platformFetch(`/api/v1/platform/tenants/${encodeURIComponent(id)}/deletion-job`, { signal });
+  return res.json();
+}
+
+export async function purgePlatformTenant(id: string, tenantCode: string): Promise<TenantDeletionJob> {
+  const res = await platformFetch(`/api/v1/platform/tenants/${encodeURIComponent(id)}/purge`, {
+    method: 'POST', body: JSON.stringify({ tenant_code: tenantCode }),
+  });
+  return res.json();
 }
 
 export interface PlatformTaskItem {

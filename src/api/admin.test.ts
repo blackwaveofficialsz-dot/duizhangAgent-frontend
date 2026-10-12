@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apiFetch } from './client';
-import { createRegistrationInvite, listRegistrationInvites } from './admin';
+import { createRegistrationInvite, listRegistrationInvites, listUsers, createUser, updateUserRole, deleteUser } from './admin';
 
 vi.mock('./client', () => ({ apiFetch: vi.fn() }));
 
@@ -66,5 +66,18 @@ describe('admin invitations api', () => {
       body: JSON.stringify({ expires_minutes: 1440, email: 'user@example.com' }),
     });
     expect(result.email_sent).toBe(true);
+  });
+});
+
+
+describe('workspace member API failures', () => {
+  it.each([
+    () => listUsers({}),
+    () => createUser({ username: 'name', password: 'password', tenant_id: 't', role: 'member' }),
+    () => updateUserRole('u', 'member'),
+    () => deleteUser('u'),
+  ])('does not treat a denied operation as success', async (request) => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, json: async () => ({ detail: '需要管理员权限' }) } as Response);
+    await expect(request()).rejects.toThrow('需要管理员权限');
   });
 });

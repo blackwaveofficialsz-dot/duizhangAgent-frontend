@@ -3,7 +3,6 @@ import { apiFetch } from '../api/client';
 import { cancelAgentRun, type AgentRunCommandResult } from '../api/agentRuns';
 import { getQueryEvidence } from '../api/connectors';
 import { readSseData } from '../api/sse';
-import { useAuthStore } from '../store/authStore';
 import { useChatStore } from '../store/chatStore';
 import { useTaskStore } from '../store/taskStore';
 import { parseAgentActivity, parseAgentResponsePayload, parsePublicAgentActivityStep, type AgentActivityStatus, type AgentActivityStep, type AgentResponsePayload, type ChatInteraction, type FileSet, type Message, type MessageStage } from '../types';
@@ -47,7 +46,6 @@ type SendMessageResult = boolean | null;
 
 export function useAgentChat(options: AgentChatOptions = {}) {
   const agui = useAguiChat();
-  const workspaceType = useAuthStore((state) => state.workspaceType);
   const loadTasks = useTaskStore((state) => state.loadTasks);
   const durableEvents = useAgentRunEvents();
   const abortRef = useRef<AbortController | null>(null);
@@ -222,7 +220,7 @@ export function useAgentChat(options: AgentChatOptions = {}) {
     const localSessionId = activeSessionId ?? createSession();
 
     const activeSession = useChatStore.getState().sessions.find((s) => s.id === localSessionId);
-    if (workspaceType !== 'personal' && activeSession?.conversationMode === 'agui' && !files?.files.length) {
+    if (activeSession?.conversationMode === 'agui' && !files?.files.length) {
       return agui.sendMessage(text, interaction);
     }
     const backendSessionId = activeSession?.pending ? '' : localSessionId;

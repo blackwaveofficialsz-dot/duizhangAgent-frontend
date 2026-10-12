@@ -80,7 +80,7 @@ describe('useAgentChat stage lifecycle', () => {
     expect(messages[messages.length - 1]?.content).toContain('[请求失败，请重试]');
   });
 
-  it('uses the legacy chat endpoint for a personal workspace even when AG-UI is enabled', async () => {
+  it('uses the AG-UI runs endpoint for a personal workspace', async () => {
     useAuthStore.setState({ workspaceType: 'personal' });
     useChatStore.setState({
       activeSessionId: 'session-1',
@@ -93,17 +93,26 @@ describe('useAgentChat stage lifecycle', () => {
         conversationMode: 'agui',
       }],
     });
-    const done = new TextEncoder().encode('data: [DONE]\n\n');
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      body: { getReader: () => ({ read: vi.fn().mockResolvedValueOnce({ done: false, value: done }) }) },
-    } as unknown as Response);
+    vi.mocked(apiStreamFetch).mockImplementationOnce(async (_url, options) => {
+      const input = JSON.parse(options!.body as string) as { runId: string; threadId: string };
+      const event = JSON.stringify({
+        type: 'RUN_FINISHED',
+        runId: input.runId,
+        threadId: input.threadId,
+        eventId: `${input.runId}:1:0`,
+        sequence: 1,
+      });
+      const response = new Response(`data: ${event}\n\n`, {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      return { response, signal: options!.signal as AbortSignal, release: vi.fn() };
+    });
     const { result } = renderHook(() => useAgentChat());
 
     await act(async () => { await result.current.sendMessage('你好'); });
 
-    expect(apiFetch).toHaveBeenCalledWith('/api/v1/chat', expect.objectContaining({ method: 'POST' }));
-    expect(apiFetch).not.toHaveBeenCalledWith('/api/v1/agui/runs', expect.anything());
+    expect(apiStreamFetch).toHaveBeenCalledWith('/api/v1/agui/runs', expect.objectContaining({ method: 'POST' }));
+    expect(apiFetch).not.toHaveBeenCalledWith('/api/v1/chat', expect.anything());
   });
 
   it('treats a terminal SSE failure as final and drops later events', async () => {

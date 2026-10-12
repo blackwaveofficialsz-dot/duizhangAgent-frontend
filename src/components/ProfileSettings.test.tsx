@@ -5,6 +5,7 @@ import { apiFetch } from '../api/client';
 import { ProfileSettings } from './ProfileSettings';
 
 const mocks = vi.hoisted(() => ({
+  acceptWorkspaceInvite: vi.fn(),
   logout: vi.fn(),
   refreshAuth: vi.fn(),
   joinTenant: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('../store/authStore', () => ({
       tenant_id: 'tenant-1', role: 'member', is_active: true,
     }],
     logout: mocks.logout, refreshAuth: mocks.refreshAuth, joinTenant: mocks.joinTenant,
+    acceptWorkspaceInvite: mocks.acceptWorkspaceInvite,
     setInitialPassword: mocks.setInitialPassword,
   }),
 }));
@@ -69,6 +71,7 @@ describe('ProfileSettings contacts', () => {
         phone: { bound: true, verified: true, masked: '+86 138****8000' },
       },
     });
+    mocks.acceptWorkspaceInvite.mockResolvedValue('已加入测试工作空间，可在工作空间列表中切换');
   });
 
   it('shows masked contact status without exposing the full target', async () => {
@@ -118,5 +121,15 @@ describe('ProfileSettings contacts', () => {
       body: JSON.stringify({ old_password: 'current-password', new_password: 'abc1234' }),
     })));
     expect(mocks.logout).toHaveBeenCalled();
+  });
+
+  it('joins a new workspace with a case-sensitive email invitation code', async () => {
+    render(<ProfileSettings />);
+
+    fireEvent.change(screen.getByLabelText('邀请码'), { target: { value: 'Ab12Mixed' } });
+    fireEvent.click(screen.getByRole('button', { name: '加入新工作空间' }));
+
+    await waitFor(() => expect(mocks.acceptWorkspaceInvite).toHaveBeenCalledWith('Ab12Mixed'));
+    expect(screen.getByLabelText('邀请码').getAttribute('value')).toBe('');
   });
 });

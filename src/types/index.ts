@@ -427,6 +427,7 @@ export interface AdminUser {
 }
 
 export interface AdminTenant {
+  status?: 'active' | 'disabled' | 'purged';
   id: string;
   brand_name: string;
   tenant_code: string;

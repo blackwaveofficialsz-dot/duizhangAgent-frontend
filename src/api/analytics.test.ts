@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 vi.mock('./client', () => ({ apiFetch }));
+const getMyStoreAccess = vi.hoisted(() => vi.fn());
+vi.mock('./storeAccess', () => ({ getMyStoreAccess }));
 
 import {
   getLaborEfficiency,
@@ -266,7 +268,7 @@ function forceAnalyticsCacheIntoIndexedDB() {
   const owner = storageMethodOwner as Record<'setItem', Storage['setItem']>;
   const originalSetItem = owner.setItem;
   return vi.spyOn(owner, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
-    if (key.startsWith('analytics-api-cache-v1:') && key !== 'analytics-api-cache-v1:cache-bust') {
+    if (key.startsWith('analytics-api-cache-v2:') && key !== 'analytics-api-cache-v2:cache-bust') {
       throw new Error('quota exceeded');
     }
     return originalSetItem.call(this, key, value);
@@ -280,7 +282,7 @@ function todayKey(): string {
 
 function dispatchAnalyticsCacheBust(namespace: string, cacheKey?: string): void {
   window.dispatchEvent(new StorageEvent('storage', {
-    key: 'analytics-api-cache-v1:cache-bust',
+    key: 'analytics-api-cache-v2:cache-bust',
     newValue: JSON.stringify({
       tenantId: localStorage.getItem('auth_tenant_id') || 'anonymous',
       day: todayKey(),
@@ -303,6 +305,7 @@ async function flushPromises(): Promise<void> {
 describe('analytics api', () => {
   beforeEach(() => {
     apiFetch.mockReset();
+    getMyStoreAccess.mockReset().mockResolvedValue({ all_stores: true, store_keys: [] });
     localStorage.clear();
   });
 
@@ -1144,5 +1147,31 @@ describe('analytics api', () => {
     } finally {
       setItemSpy.mockRestore();
     }
+  });
+});
+
+
+describe('live store access and analytics caching', () => {
+  beforeEach(() => { apiFetch.mockReset(); getMyStoreAccess.mockReset(); localStorage.clear(); });
+  it('does not reuse an administrator cache after demotion and checks grants on every read', async () => {
+    getMyStoreAccess.mockResolvedValueOnce({ all_stores: true, store_keys: [] })
+      .mockResolvedValue({ all_stores: false, store_keys: ['s1'] });
+    apiFetch.mockResolvedValueOnce(ok({ store_key: 's1', employees: ['all-workspace'] }))
+      .mockResolvedValueOnce(ok({ store_key: 's1', employees: ['scoped'] }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: '尚未分配店铺查看权限' }), { status: 403 }));
+    await getLaborEfficiencyDetail('2026-10-01', '2026-10-02', 's1');
+    expect(await getLaborEfficiencyDetail('2026-10-01', '2026-10-02', 's1')).toMatchObject({ employees: ['scoped'] });
+    await expect(getLaborEfficiencyDetail('2026-10-01', '2026-10-02', 's1')).rejects.toThrow();
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    expect(getMyStoreAccess).toHaveBeenCalledTimes(3);
+  });
+  it('partitions cached results between accounts in the same workspace', async () => {
+    getMyStoreAccess.mockResolvedValue({ all_stores: true, store_keys: [] });
+    apiFetch.mockResolvedValueOnce(ok({ account: 'a' })).mockResolvedValueOnce(ok({ account: 'b' }));
+    localStorage.setItem('auth_user_id', 'a');
+    await getLaborEfficiencyDetail('2026-10-01', '2026-10-02', 's1');
+    localStorage.setItem('auth_user_id', 'b');
+    expect(await getLaborEfficiencyDetail('2026-10-01', '2026-10-02', 's1')).toMatchObject({ account: 'b' });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 });

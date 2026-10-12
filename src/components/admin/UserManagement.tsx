@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Input, Select, Table, type TableColumnsType } from 'antd';
 import type { AdminUser, AdminTenant } from '../../types';
 import { listUsers, createUser, updateUserRole, deleteUser } from '../../api/admin';
+import { useAuthStore } from '../../store/authStore';
 import { TableDisplayFrame } from '../TableDisplayFrame';
 import { formatBeijingTime } from '../../utils/time';
 import { ConfirmDialog } from '../ConfirmDialog';
@@ -10,9 +11,17 @@ import { RegistrationInvitesPanel } from './RegistrationInvitesPanel';
 
 interface UserManagementProps {
   tenants: AdminTenant[];
+  refreshKey?: number;
+  onMembersChanged?: () => void;
 }
 
-export function UserManagement({ tenants }: UserManagementProps) {
+export function UserManagement({ tenants, refreshKey = 0, onMembersChanged }: UserManagementProps) {
+  const currentUserId = useAuthStore((s) => s.userId);
+  const [page, setPage] = useState(1);
+  const [role, setRole] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -32,64 +41,83 @@ export function UserManagement({ tenants }: UserManagementProps) {
     }
   }, [tenants]);
 
-  async function fetchUsers() {
-    setLoading(true);
-    try {
-      const data = await listUsers({ search: search || undefined });
-      setUsers(data.users);
-      setTotal(data.total);
-    } catch (e) {
-      console.error('Failed to load users:', e);
-    } finally {
-      setLoading(false);
-    }
+  function refreshMembers() {
+    setRevision((value) => value + 1);
+    onMembersChanged?.();
   }
 
-  useEffect(() => { fetchUsers(); }, [search]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    listUsers({ search: search || undefined, role: role || undefined, limit: 20, offset: (page - 1) * 20 }, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        const lastPage = Math.max(1, Math.ceil(data.total / 20));
+        if (page > lastPage) { setPage(lastPage); return; }
+        setUsers(data.users);
+        setTotal(data.total);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setUsers([]);
+        setTotal(0);
+        showNotice(error instanceof Error ? error.message : '加载成员失败', 'error');
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [search, role, page, revision, refreshKey]);
 
   async function handleCreate() {
-    if (!newUser.username || !newUser.password) return;
+    if (!newUser.username || !newUser.password || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     try {
       await createUser(newUser);
       setShowCreate(false);
       setNewUser({ username: '', password: '', tenant_id: tenants[0]?.id ?? '', role: 'member' });
-      fetchUsers();
+      refreshMembers();
       showNotice('用户已创建', 'success');
     } catch (e) {
       showNotice(e instanceof Error ? e.message : '创建失败', 'error');
-    }
+    } finally { busyRef.current = false; setBusy(false); }
   }
 
-  async function handleRoleChange(user: AdminUser) {
+  function handleRoleChange(user: AdminUser) {
     const newRole = user.role === 'member' ? 'admin' : 'member';
-    try {
-      await updateUserRole(user.id, newRole);
-      fetchUsers();
-      showNotice('用户角色已更新', 'success');
-    } catch (e) {
-      showNotice(e instanceof Error ? e.message : '角色更新失败', 'error');
-    }
+    setConfirmDialog({
+      title: '修改成员权限',
+      message: `将 ${user.username} 设为${newRole === 'admin' ? '管理员，可管理成员、邀请及空间设置' : '成员，撤销管理权限'}？仅影响当前工作空间。`,
+      onConfirm: async () => {
+        await updateUserRole(user.id, newRole);
+        refreshMembers();
+        showNotice('成员权限已更新', 'success');
+      },
+    });
   }
 
   async function handleDelete(id: string) {
     setConfirmDialog({
-      title: '删除用户',
-      message: '确定删除该用户？',
+      title: '移除成员',
+      message: '确定移除该成员？将撤销当前空间的访问权，保留账号及其他工作空间。',
       onConfirm: async () => {
         await deleteUser(id);
-        fetchUsers();
-        showNotice('用户已删除', 'success');
+        refreshMembers();
+        showNotice('成员已移除', 'success');
       },
     });
   }
 
   async function handleConfirmDialog() {
-    if (!confirmDialog) return;
+    if (!confirmDialog || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     try {
       await confirmDialog.onConfirm();
     } catch (e) {
-      showNotice(e instanceof Error ? e.message : '删除失败', 'error');
+      showNotice(e instanceof Error ? e.message : '操作失败', 'error');
     } finally {
+      busyRef.current = false;
+      setBusy(false);
       setConfirmDialog(null);
     }
   }
@@ -112,7 +140,7 @@ export function UserManagement({ tenants }: UserManagementProps) {
       title: '角色',
       dataIndex: 'role',
       render: (role) => (
-        <span className={`px-2 py-0.5 rounded text-xs font-medium ${role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}`}>{role}</span>
+        <span className={`px-2 py-0.5 rounded text-xs font-medium ${role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}`}>{role === 'admin' ? '管理员' : '成员'}</span>
       ),
     },
     {
@@ -131,8 +159,8 @@ export function UserManagement({ tenants }: UserManagementProps) {
       align: 'right',
       render: (_, u) => (
         <div className="space-x-2">
-          <Button autoInsertSpace={false} type="text" onClick={() => handleRoleChange(u)} className="h-auto border-0 p-0 text-xs text-blue-600 shadow-none hover:text-blue-800">{u.role === 'admin' ? '降为成员' : '升为管理员'}</Button>
-          <Button autoInsertSpace={false} type="text" onClick={() => handleDelete(u.id)} className="h-auto border-0 p-0 text-xs text-red-600 shadow-none hover:text-red-800">删除</Button>
+          <Button autoInsertSpace={false} type="text" disabled={busy || u.id === currentUserId} title={u.id === currentUserId ? '请由其他管理员调整您的权限' : undefined} onClick={() => handleRoleChange(u)} className="h-auto border-0 p-0 text-xs text-blue-600 shadow-none hover:text-blue-800">{u.role === 'admin' ? '降为成员' : '升为管理员'}</Button>
+          <Button autoInsertSpace={false} type="text" disabled={busy || u.id === currentUserId} onClick={() => handleDelete(u.id)} className="h-auto border-0 p-0 text-xs text-red-600 shadow-none hover:text-red-800">移除</Button>
         </div>
       ),
     },
@@ -140,10 +168,17 @@ export function UserManagement({ tenants }: UserManagementProps) {
 
   return (
     <div className="space-y-4">
+      <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+        <h2 className="mb-2 font-semibold text-slate-800">成员与权限</h2>
+        管理员可管理成员、邀请和空间设置；成员可使用已开放的业务功能。角色仅在当前工作空间生效。
+        当前账号的权限请由其他管理员调整，空间至少保留一名管理员。
+      </div>
       <RegistrationInvitesPanel />
 	      <div className="flex items-center justify-between">
-	        <Input type="text" placeholder="搜索用户名..." value={search} onChange={(e) => setSearch(e.target.value)} className={inputCls + ' w-64'} />
-	        <Button autoInsertSpace={false} onClick={() => setShowCreate(!showCreate)} className="h-auto rounded-lg bg-blue-500 px-4 py-2 text-sm text-white hover:bg-blue-600">+ 新建用户</Button>
+	        <Input type="text" placeholder="搜索用户名..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className={inputCls + ' w-64'} />
+	        <Select aria-label="按角色筛选" value={role} onChange={(value) => { setRole(value); setPage(1); }}
+          options={[{ value: '', label: '全部角色' }, { value: 'admin', label: '管理员' }, { value: 'member', label: '成员' }]} />
+        <Button autoInsertSpace={false} onClick={() => setShowCreate(!showCreate)} className="h-auto rounded-lg bg-blue-500 px-4 py-2 text-sm text-white hover:bg-blue-600">+ 新建用户</Button>
 	      </div>
 
       {showCreate && (
@@ -166,13 +201,13 @@ export function UserManagement({ tenants }: UserManagementProps) {
 	              onChange={(role) => setNewUser({ ...newUser, role })}
 	              className={inputCls}
 	              options={[
-	                { value: 'member', label: 'Member' },
-	                { value: 'admin', label: 'Admin' },
+	                { value: 'member', label: '成员' },
+	                { value: 'admin', label: '管理员' },
 	              ]}
 	            />
 	          </div>
 	          <div className="flex gap-2">
-	            <Button autoInsertSpace={false} onClick={handleCreate} className="h-auto rounded bg-blue-500 px-4 py-2 text-sm text-white hover:bg-blue-600">创建</Button>
+	            <Button autoInsertSpace={false} loading={busy} onClick={handleCreate} className="h-auto rounded bg-blue-500 px-4 py-2 text-sm text-white hover:bg-blue-600">创建</Button>
 	            <Button autoInsertSpace={false} onClick={() => setShowCreate(false)} className="h-auto rounded bg-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-300">取消</Button>
 	          </div>
         </div>
@@ -187,7 +222,7 @@ export function UserManagement({ tenants }: UserManagementProps) {
               rowKey="id"
               columns={columns}
               dataSource={users}
-              pagination={false}
+              pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }}
               size="small"
               locale={{ emptyText: '无数据' }}
             />
@@ -200,6 +235,7 @@ export function UserManagement({ tenants }: UserManagementProps) {
           title={confirmDialog.title}
           message={confirmDialog.message}
           confirmLabel="确认"
+          loading={busy}
           onConfirm={handleConfirmDialog}
           onCancel={() => setConfirmDialog(null)}
         />

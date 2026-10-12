@@ -1,0 +1,63 @@
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, expect, it, vi } from 'vitest';
+import { listUsers } from '../../api/admin';
+import { deleteStoreAccess, getMemberStoreAccess, listAccessStores, listStoreAccess, saveStoreAccess } from '../../api/storeAccess';
+import { StoreAccessManagement } from './StoreAccessManagement';
+vi.mock('../../api/admin', () => ({ listUsers: vi.fn() }));
+vi.mock('../../api/storeAccess', () => ({ listStoreAccess: vi.fn(), listAccessStores: vi.fn(), saveStoreAccess: vi.fn(), deleteStoreAccess: vi.fn(), getMemberStoreAccess: vi.fn() }));
+const group = { id: 'g1', kind: 'group' as const, name: '华东', version: 2, members: [{ id: 'u1', username: '小王' }], store_keys: ['s1'] };
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(listStoreAccess).mockImplementation(async kind => ({ items: kind === 'group' ? [group] : [] }));
+  vi.mocked(listAccessStores).mockResolvedValue({ items: [{ key: 's1', name: '一店' }, { key: 's2', name: '二店' }] });
+  vi.mocked(listUsers).mockResolvedValue({ users: [{ id: 'u1', username: '小王', tenant_id: 't', role: 'member', must_change_password: false, created_at: '' }], total: 1 });
+  vi.mocked(saveStoreAccess).mockResolvedValue(group);
+  vi.mocked(deleteStoreAccess).mockResolvedValue();
+  vi.mocked(getMemberStoreAccess).mockResolvedValue({ all_stores: false, store_keys: ['s1', 's2'] });
+});
+it('edits assigned members and stores with the current conflict version', async () => {
+  render(<StoreAccessManagement refreshKey={0} />);
+  fireEvent.click(await screen.findByRole('button', { name: /编\s*辑/ }));
+  const dialog = screen.getByRole('dialog');
+  expect((within(dialog).getByLabelText('群组名称') as HTMLInputElement).value).toBe('华东');
+  fireEvent.change(within(dialog).getByLabelText('群组名称'), { target: { value: '华东运营' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存权限' }));
+  await waitFor(() => expect(saveStoreAccess).toHaveBeenCalledWith('g1', { kind: 'group', name: '华东运营', member_ids: ['u1'], store_keys: ['s1'], version: 2 }, expect.any(AbortSignal)));
+  expect(await screen.findByText('权限已保存，下次查询生效')).toBeTruthy();
+});
+it('creates a role with empty grants without silently granting all stores', async () => {
+  render(<StoreAccessManagement refreshKey={0} />);
+  fireEvent.click(screen.getByRole('tab', { name: '角色管理' }));
+  await waitFor(() => expect(listStoreAccess).toHaveBeenLastCalledWith('role', expect.any(AbortSignal)));
+  fireEvent.click(screen.getByRole('button', { name: '新建角色' }));
+  const dialog = screen.getByRole('dialog');
+  expect(within(dialog).getByRole('button', { name: '保存权限' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.change(within(dialog).getByLabelText('角色名称'), { target: { value: '观察员' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存权限' }));
+  await waitFor(() => expect(saveStoreAccess).toHaveBeenCalledWith(undefined, { kind: 'role', name: '观察员', member_ids: [], store_keys: [], version: undefined }, expect.any(AbortSignal)));
+});
+it('confirms deleting a grant and displays conflicts without closing the editor', async () => {
+  render(<StoreAccessManagement refreshKey={0} />);
+  fireEvent.click(await screen.findByRole('button', { name: /删\s*除/ }));
+  expect(deleteStoreAccess).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+  await waitFor(() => expect(deleteStoreAccess).toHaveBeenCalledWith(group, expect.any(AbortSignal)));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  vi.mocked(saveStoreAccess).mockRejectedValue(new Error('权限已被其他管理员修改，请刷新后重试'));
+  fireEvent.click(screen.getByRole('button', { name: /编\s*辑/ }));
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '保存权限' }));
+  expect(await screen.findByText('权限已被其他管理员修改，请刷新后重试')).toBeTruthy();
+  expect(screen.getByRole('dialog')).toBeTruthy();
+});
+it('shows the final member union and aborts pending requests on unmount', async () => {
+  const { unmount } = render(<StoreAccessManagement refreshKey={0} />);
+  await waitFor(() => expect(listUsers).toHaveBeenCalled());
+  fireEvent.mouseDown(screen.getByRole('combobox', { name: '查看成员最终权限' }));
+  fireEvent.click(await screen.findByText('小王', { selector: '.ant-select-item-option-content' }));
+  expect(await screen.findByText('二店', { selector: '.ant-tag' })).toBeTruthy();
+  const previewSignal = vi.mocked(getMemberStoreAccess).mock.calls[0][1];
+  const listSignal = vi.mocked(listStoreAccess).mock.calls[0][1];
+  unmount();
+  expect(previewSignal?.aborted).toBe(true);
+  expect(listSignal?.aborted).toBe(true);
+});

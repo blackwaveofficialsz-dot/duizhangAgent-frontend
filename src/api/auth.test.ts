@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  acceptWorkspaceInvite,
   getAuthCapabilities,
   getAccountState,
   getContactStatus,
@@ -221,5 +222,27 @@ describe('auth api', () => {
     for (const call of fetchMock.mock.calls) {
       expect(new Headers(call[1].headers).get('Authorization')).toBe('Bearer access-token');
     }
+  });
+
+  it('accepts a mixed-case workspace invitation without changing the code', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      workspace: {
+        workspace_id: 'tenant-2', workspace_type: 'tenant', name: '租户 B',
+        tenant_id: 'tenant-2', role: 'member', is_active: false,
+      },
+      message: '已加入租户 B，可在工作空间列表中切换',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await acceptWorkspaceInvite('Ab12Mixed', 'access-token');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/v1/auth/accept-invite'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ invite_token: 'Ab12Mixed' }),
+      }),
+    );
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get('Authorization')).toBe('Bearer access-token');
   });
 });

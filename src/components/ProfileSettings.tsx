@@ -27,6 +27,7 @@ export function ProfileSettings() {
     workspaceType,
     activeWorkspaceId,
     workspaces,
+    acceptWorkspaceInvite,
     joinTenant,
     setInitialPassword,
     logout,
@@ -36,8 +37,10 @@ export function ProfileSettings() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [tenantCode, setTenantCode] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [tenantLoading, setTenantLoading] = useState(false);
+  const [inviteLoading, setInviteLoading] = useState(false);
   const [contacts, setContacts] = useState<ContactStatus | null>(null);
   const [contactManagementEnabled, setContactManagementEnabled] = useState(false);
   const [contactChannel, setContactChannel] = useState<VerificationChannel | null>(null);
@@ -142,6 +145,33 @@ export function ProfileSettings() {
     }
   }
 
+  async function handleAcceptInvite(event: React.FormEvent) {
+    event.preventDefault();
+    const code = inviteCode.trim();
+    if (!code) {
+      notification.warning({ title: '请输入邀请码', duration: 5, closable: true });
+      return;
+    }
+    setInviteLoading(true);
+    try {
+      const message = await acceptWorkspaceInvite(code);
+      notification.success({
+        title: message || '已加入新工作空间',
+        duration: 5,
+        closable: true,
+      });
+      setInviteCode('');
+    } catch (error) {
+      notification.error({
+        title: error instanceof Error ? error.message : '加入工作空间失败',
+        duration: 5,
+        closable: true,
+      });
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
   function openContact(channel: VerificationChannel, bound: boolean) {
     setContactChannel(channel);
     setContactMode(bound ? 'change' : 'bind');
@@ -225,6 +255,32 @@ export function ProfileSettings() {
         </section>}
 
         {workspaceType === 'tenant' && <PreferencesPanel />}
+
+        <section className="rounded-lg border border-slate-200 bg-white p-4 md:p-6">
+          <h2 className="mb-2 text-base font-semibold text-slate-800">加入新工作空间</h2>
+          <p className="mb-4 text-sm text-slate-500">输入邮件中的邀请码，成功后可在工作空间列表中切换。</p>
+          <form onSubmit={handleAcceptInvite} className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label htmlFor="workspace-invite-code" className="block flex-1 text-sm text-slate-500">
+              邀请码
+              <Input
+                id="workspace-invite-code"
+                aria-label="邀请码"
+                value={inviteCode}
+                onChange={(event) => setInviteCode(event.target.value)}
+                placeholder="输入邮件中的邀请码"
+                className={inputClass}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <span className="mt-1 block text-xs text-slate-400">邀请码区分大小写，且只能使用一次。</span>
+            </label>
+            <Button type="primary" htmlType="submit" loading={inviteLoading} className="sm:w-auto">
+              加入新工作空间
+            </Button>
+          </form>
+        </section>
 
         <section className="rounded-lg border border-slate-200 bg-white p-4 md:p-6">
           <h2 className="mb-2 text-base font-semibold text-slate-800">申请加入租户</h2>

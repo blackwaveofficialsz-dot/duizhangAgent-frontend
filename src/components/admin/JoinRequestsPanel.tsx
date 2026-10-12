@@ -1,40 +1,41 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button } from 'antd';
+import { Button } from 'antd';
+import { FloatingNotice, type FloatingNoticeState } from '../FloatingNotice';
 import { approveJoinRequest, listJoinRequests, rejectJoinRequest, type JoinRequest } from '../../api/admin';
 
 /**
  * 迁入租户申请审批面板：用户凭租户码申请加入本租户，管理员在此通过/驳回。
  * 自包含状态，挂在后台「用户」标签页。
  */
-export function JoinRequestsPanel() {
+export function JoinRequestsPanel({ onApproved }: { onApproved?: () => void } = {}) {
   const [items, setItems] = useState<JoinRequest[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<FloatingNoticeState | null>(null);
+  const [revision, setRevision] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function refresh() {
+  useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
-    setError(null);
-    try {
-      setItems(await listJoinRequests());
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { void refresh(); }, []);
+    listJoinRequests(controller.signal).then((data) => {
+      if (!controller.signal.aborted) setItems(data);
+    }).catch((error) => {
+      if (!controller.signal.aborted) setNotice({ message: error.message, variant: 'error' });
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [revision]);
 
   async function decide(id: string, action: 'approve' | 'reject') {
     setBusyId(id);
-    setError(null);
+    setNotice(null);
     try {
       if (action === 'approve') await approveJoinRequest(id);
       else await rejectJoinRequest(id);
-      await refresh();
+      setRevision((value) => value + 1);
+      if (action === 'approve') onApproved?.();
+      setNotice({ message: action === 'approve' ? '已批准加入工作空间' : '已驳回申请', variant: 'success' });
     } catch (e) {
-      setError((e as Error).message);
+      setNotice({ message: (e as Error).message, variant: 'error' });
     } finally {
       setBusyId(null);
     }
@@ -45,14 +46,12 @@ export function JoinRequestsPanel() {
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-sm font-semibold text-slate-800">加入申请</h3>
-          <p className="mt-0.5 text-xs text-slate-400">用户凭租户码申请迁入本租户，审批通过后其下次登录生效。</p>
+          <p className="mt-0.5 text-xs text-slate-400">用户凭租户码申请加入，审批通过后可从空间切换器进入。</p>
         </div>
         <span className="text-[11px] text-slate-400">待处理 {items.length}</span>
       </div>
 
-	      {error && (
-	        <Alert showIcon={false} type="error" title={error} className="mb-3 rounded-lg border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600" />
-	      )}
+      {notice && <FloatingNotice notice={notice} onClose={() => setNotice(null)} />}
 
       {loading ? (
         <p className="py-4 text-center text-xs text-slate-400">加载中…</p>
@@ -70,7 +69,7 @@ export function JoinRequestsPanel() {
 	                <Button
 	                  autoInsertSpace={false}
 	                  onClick={() => decide(it.id, 'approve')}
-	                  disabled={busyId === it.id}
+	                  disabled={busyId !== null}
 	                  className="h-auto rounded-lg bg-emerald-500 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-40"
 	                >
 	                  通过
@@ -78,7 +77,7 @@ export function JoinRequestsPanel() {
 	                <Button
 	                  autoInsertSpace={false}
 	                  onClick={() => decide(it.id, 'reject')}
-	                  disabled={busyId === it.id}
+	                  disabled={busyId !== null}
 	                  className="h-auto rounded-lg border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40"
 	                >
 	                  驳回

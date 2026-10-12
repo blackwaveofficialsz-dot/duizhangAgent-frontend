@@ -54,6 +54,11 @@ export interface WorkspaceList {
   items: Workspace[];
 }
 
+export interface AcceptInviteResponse {
+  workspace: Workspace;
+  message: string;
+}
+
 export interface PhoneStatus {
   is_registered: boolean;
   has_password: boolean;
@@ -233,6 +238,16 @@ export function getAccountState(token: string): Promise<AccountState> {
 
 export function getWorkspaces(token: string): Promise<WorkspaceList> {
   return authRequest<WorkspaceList>('/api/v1/auth/workspaces', {}, token);
+}
+
+export function acceptWorkspaceInvite(
+  inviteToken: string,
+  token: string,
+): Promise<AcceptInviteResponse> {
+  return authRequest<AcceptInviteResponse>('/api/v1/auth/accept-invite', {
+    method: 'POST',
+    body: JSON.stringify({ invite_token: inviteToken }),
+  }, token);
 }
 
 export function switchActiveWorkspace(workspaceId: string, token: string): Promise<AuthResponse> {

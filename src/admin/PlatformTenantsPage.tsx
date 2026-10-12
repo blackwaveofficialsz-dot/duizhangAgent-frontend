@@ -1,13 +1,16 @@
 import { CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Button, Input, Select, Table, type TableColumnsType } from 'antd';
-import { useEffect, useState } from 'react';
+import { Button, Input, Modal, Select, Table, type TableColumnsType } from 'antd';
+import { useEffect, useRef, useState } from 'react';
 import type { AdminTenant } from '../types';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { FloatingNotice, type FloatingNoticeState } from '../components/FloatingNotice';
 import { formatBeijingTime } from '../utils/time';
 import {
   createPlatformTenant,
-  deletePlatformTenant,
+  disablePlatformTenant,
+  purgePlatformTenant,
+  getPlatformTenantDeletionJob,
+  type TenantDeletionJob,
   listPlatformTenants,
   regeneratePlatformTenantCode,
   updatePlatformTenant,
@@ -39,7 +42,14 @@ export function PlatformTenantsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
-  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [jobRevision, setJobRevision] = useState(0);
+  const [job, setJob] = useState<TenantDeletionJob | null>(null);
+  const [jobLoading, setJobLoading] = useState(false);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeCode, setPurgeCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [drawerMode, setDrawerMode] = useState<'create' | 'edit' | null>(null);
   const [editingTenant, setEditingTenant] = useState<AdminTenant | null>(null);
   const [form, setForm] = useState<TenantFormState>(emptyTenantForm);
@@ -50,29 +60,58 @@ export function PlatformTenantsPage() {
     setNotice({ message, variant });
   }
 
-  async function fetchTenants() {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await listPlatformTenants({
-        search: search || undefined,
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-      });
-      setTenants(data.tenants);
-      setTotal(data.total);
-    } catch (err) {
-      setTenants([]);
-      setTotal(0);
-      setError(err instanceof Error ? err.message : '加载租户失败');
-    } finally {
-      setLoading(false);
-    }
-  }
+  function fetchTenants() { setRevision((value) => value + 1); }
 
   useEffect(() => {
-    void fetchTenants();
-  }, [search, page]);
+    const controller = new AbortController();
+    setLoading(true);
+    listPlatformTenants({ search: search || undefined, limit: PAGE_SIZE, offset: page * PAGE_SIZE }, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        setTenants(data.tenants);
+        setTotal(data.total);
+        setEditingTenant((previous) => previous ? data.tenants.find((t) => t.id === previous.id) ?? previous : null);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setTenants([]);
+        setTotal(0);
+        showNotice(error instanceof Error ? error.message : '加载租户失败', 'error');
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [search, page, revision]);
+
+  const editingTenantId = editingTenant?.id;
+  useEffect(() => {
+    if (!editingTenantId) { setJob(null); return; }
+    const controller = new AbortController();
+    setJobLoading(true);
+    setJob(null);
+    getPlatformTenantDeletionJob(editingTenantId, controller.signal).then((value) => {
+      if (!controller.signal.aborted) setJob(value);
+    }).catch((error) => {
+      if (!controller.signal.aborted) showNotice(error instanceof Error ? error.message : '加载清除状态失败', 'error');
+    }).finally(() => { if (!controller.signal.aborted) setJobLoading(false); });
+    return () => controller.abort();
+  }, [editingTenantId, jobRevision]);
+
+  async function confirmPurge() {
+    if (!editingTenant || busyRef.current || !editingTenant.tenant_code || purgeCode.trim().toUpperCase() !== editingTenant.tenant_code.toUpperCase()) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      const result = await purgePlatformTenant(editingTenant.id, purgeCode);
+      setJob(result);
+      setPurgeOpen(false);
+      fetchTenants();
+      showNotice('清除任务已提交，可刷新查看处理状态', 'success');
+    } catch (error) {
+      setPurgeOpen(false);
+      showNotice(error instanceof Error ? error.message : '提交清除失败', 'error');
+      setJobRevision((value) => value + 1);
+    } finally { busyRef.current = false; setBusy(false); }
+  }
 
   function closeDrawer() {
     setDrawerMode(null);
@@ -135,13 +174,13 @@ export function PlatformTenantsPage() {
 
   function removeTenant(id: string) {
     setConfirmDialog({
-      title: '删除租户',
-      message: '确定删除该租户？关联用户会一并删除。',
+      title: '停用租户',
+      message: '停用后成员无法访问此工作空间，进行中的任务将被取消。数据将保留，永久清除需另行确认。',
       onConfirm: async () => {
-        await deletePlatformTenant(id);
+        await disablePlatformTenant(id);
         closeDrawer();
         await fetchTenants();
-        showNotice('租户已删除', 'success');
+        showNotice('租户已停用', 'success');
       },
     });
   }
@@ -157,17 +196,22 @@ export function PlatformTenantsPage() {
   }
 
   async function handleConfirmDialog() {
-    if (!confirmDialog) return;
+    if (!confirmDialog || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     try {
       await confirmDialog.onConfirm();
     } catch (err) {
       showNotice(err instanceof Error ? err.message : '操作失败', 'error');
     } finally {
+      busyRef.current = false;
+      setBusy(false);
       setConfirmDialog(null);
     }
   }
 
   const columns: TableColumnsType<AdminTenant> = [
+    { title: '状态', dataIndex: 'status', render: (status) => ({ active: '正常', disabled: '已停用', purged: '已清除' }[status as string] ?? '正常') },
     {
       title: '品牌 / 租户码',
       key: 'tenant',
@@ -217,7 +261,7 @@ export function PlatformTenantsPage() {
   const drawerFooter = (
     <div className="flex justify-end gap-2">
       <Button onClick={closeDrawer}>取消</Button>
-      <Button type="primary" onClick={drawerMode === 'create' ? handleCreate : handleSave}>
+      <Button type="primary" disabled={drawerMode === 'edit' && editingTenant?.status !== undefined && editingTenant.status !== 'active'} onClick={drawerMode === 'create' ? handleCreate : handleSave}>
         {drawerMode === 'create' ? '创建租户' : '保存变更'}
       </Button>
     </div>
@@ -241,8 +285,8 @@ export function PlatformTenantsPage() {
           }}
           className="w-full sm:w-72"
         />
+        <Button onClick={() => { fetchTenants(); setJobRevision((value) => value + 1); }}>刷新状态</Button>
       </PlatformFilterBar>
-      {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
       <section className="overflow-hidden rounded-md border border-slate-200 bg-white">
         <Table<AdminTenant>
           columns={columns}
@@ -275,9 +319,16 @@ export function PlatformTenantsPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button icon={<CopyOutlined aria-hidden />} onClick={() => void copyCode(editingTenant.tenant_code)}>复制租户码</Button>
-                <Button icon={<ReloadOutlined aria-hidden />} onClick={() => refreshCode(editingTenant.id)}>刷新租户码</Button>
-                <Button danger icon={<DeleteOutlined aria-hidden />} onClick={() => removeTenant(editingTenant.id)}>删除租户</Button>
+                <Button disabled={editingTenant.status === 'purged' || job?.purge_queued} icon={<ReloadOutlined aria-hidden />} onClick={() => refreshCode(editingTenant.id)}>刷新租户码</Button>
+                {(!editingTenant.status || editingTenant.status === 'active') && <Button danger icon={<DeleteOutlined aria-hidden />} onClick={() => removeTenant(editingTenant.id)}>停用租户</Button>}
+                {editingTenant.status === 'disabled' && <Button danger disabled={jobLoading || !job || !['disabled', 'failed'].includes(job.status) || !editingTenant.tenant_code}
+                  onClick={() => { setPurgeCode(''); setPurgeOpen(true); }}>永久清除</Button>}
+                <Button loading={jobLoading} onClick={() => { setJobRevision((value) => value + 1); fetchTenants(); }}>刷新清除状态</Button>
               </div>
+              {job && <div className="text-sm text-slate-600">
+                <span>{({ disabled: '尚未清除', purge_requested: '等待清除', running: '清除中', failed: '清除失败，可重试', completed: '已永久清除' } as Record<string, string>)[job.status] ?? job.status}</span>
+                {job.last_error && <p>失败原因：{job.last_error}</p>}
+              </div>}
             </section>
           )}
           <TenantFields value={form} onChange={setForm} />
@@ -288,10 +339,18 @@ export function PlatformTenantsPage() {
           title={confirmDialog.title}
           message={confirmDialog.message}
           confirmLabel="确认"
+          loading={busy}
           onConfirm={handleConfirmDialog}
           onCancel={() => setConfirmDialog(null)}
         />
       )}
+      <Modal open={purgeOpen} title="永久清除租户" okText="确认清除" cancelText="取消" confirmLoading={busy}
+        onOk={() => void confirmPurge()} onCancel={() => { if (!busy) setPurgeOpen(false); }}
+        okButtonProps={{ danger: true, disabled: !editingTenant?.tenant_code || purgeCode.trim().toUpperCase() !== editingTenant.tenant_code.toUpperCase() }}
+        cancelButtonProps={{ disabled: busy }}>
+        <p className="mb-3">此操作不可撤销，将永久清除此租户的数据和成员关系。全局账号及其他工作空间会保留。</p>
+        <label>请输入租户码 {editingTenant?.tenant_code}<Input aria-label="确认租户码" value={purgeCode} onChange={(event) => setPurgeCode(event.target.value)} /></label>
+      </Modal>
       {notice && <FloatingNotice notice={notice} onClose={() => setNotice(null)} />}
     </div>
   );
