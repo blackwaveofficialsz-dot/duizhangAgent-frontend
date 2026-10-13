@@ -287,6 +287,56 @@ describe('ResponsePartsRenderer', () => {
     expect(screen.getByText('暂无可用数据')).toBeTruthy();
   });
 
+  it('paces a newly received completed overview through cards, rows and notice text', () => {
+    let time = 0;
+    let frameId = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.spyOn(performance, 'now').mockImplementation(() => time);
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.set(++frameId, callback);
+      return frameId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id); });
+    const tick = (ms: number) => act(() => {
+      time += ms;
+      const callbacks = [...frames.values()];
+      frames.clear();
+      callbacks.forEach(callback => callback(time));
+    });
+    const notice = '按已收到的推送汇总，金额尚待核验。'.repeat(4);
+    const { unmount } = render(<ResponsePartsRenderer response={response({
+      task: 'live_orders_summary', result_status: 'partial', parts: [
+        { kind: 'summary', title: '实时经营概览', metrics: [
+          { key: 'customer_paid_net', label: '客户实付净额', value: '待核验' },
+          { key: 'sale_order_count', label: '已收销售订单量', value: '2', unit: 'order' },
+          { key: 'active_store_count', label: '有推送门店', value: '2 / 2' },
+        ] },
+        { kind: 'table', title: '实时门店汇总', table_id: 'live_order_store_overview', row_count: 2,
+          columns: [{ key: 'store_name', label: '门店' }],
+          preview_rows: [{ store_name: '测试门店甲' }, { store_name: '测试门店乙' }] },
+        { kind: 'notice', title: '实时数据口径', severity: 'warning', code: 'provisional_push_events', message: notice },
+      ],
+    })} animate streaming={false} />);
+
+    expect(screen.queryByText('客户实付净额')).toBeNull();
+    expect(screen.queryByText('测试门店甲')).toBeNull();
+    expect(screen.queryByText(notice)).toBeNull();
+    tick(240);
+    tick(240);
+    expect(screen.getByText('客户实付净额')).toBeTruthy();
+    expect(screen.queryByText('有推送门店')).toBeNull();
+    expect(screen.queryByText('测试门店甲')).toBeNull();
+    tick(160);
+    expect(screen.getByText('测试门店甲')).toBeTruthy();
+    expect(screen.queryByText('测试门店乙')).toBeNull();
+    for (let index = 0; index < 200; index += 1) tick(32);
+    expect(screen.getByText('测试门店乙')).toBeTruthy();
+    expect(screen.getByText('有推送门店')).toBeTruthy();
+    expect(screen.getByText(notice)).toBeTruthy();
+    unmount();
+    expect(frames.size).toBe(0);
+  });
+
   it('expands only preview rows already included in an expand_table action response', () => {
     setMobileViewport(true);
     render(

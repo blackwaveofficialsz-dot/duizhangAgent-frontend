@@ -293,7 +293,7 @@ describe('MessageBubble table rendering', () => {
       expect(screen.queryByTitle('复制内容')).toBeNull();
       expect(container.querySelector('.markdown-body')?.closest('[aria-live="off"]')).not.toBeNull();
       expect(screen.queryByRole('button', { name: '直接显示全部' })).toBeNull();
-      for (let i = 0; i < 20; i++) tick();
+      for (let i = 0; i < 40; i++) tick();
       expect(screen.queryByText('回复已完整显示')).toBeNull();
       expect(container.querySelectorAll('.markdown-body strong')).toHaveLength(4);
       fireEvent.click(screen.getByTitle('复制内容'));
@@ -337,7 +337,7 @@ describe('MessageBubble table rendering', () => {
       expect(screen.queryByText('9月2日')).toBeNull();
       rerender(<MessageBubble message={{ ...running, content: fullText, streaming: false, agui: { runId: 'run-1', status: 'completed' } }} sessionId="s" animateText />);
       expect(screen.queryByText('9月2日')).toBeNull();
-      for (let i = 0; i < 30; i++) tick();
+      for (let i = 0; i < 60; i++) tick();
       expect(screen.getByText('9月2日')).toBeTruthy();
       expect(screen.getByTitle('下载表格')).toBeTruthy();
       expect(frames.size).toBe(0);

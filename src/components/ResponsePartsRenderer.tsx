@@ -4,7 +4,7 @@ import { Alert, Button, Input, Radio, Table, notification, type TableColumnsType
 
 import { isQuestionnairePart, type AgentResponseAction, type AgentResponsePart, type AgentResponsePayload, type ChatInteraction, type ClarificationAnswer, type QuestionnairePart } from '../types';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { useTableTypewriter } from '../hooks/useTypewriter';
+import { useTableTypewriter, useTypewriter } from '../hooks/useTypewriter';
 import { formatDisplayValue } from '../utils/displayValue';
 import { parseBeijingTime } from '../utils/time';
 import { TableDisplayFrame, type TableDisplayData } from './TableDisplayFrame';
@@ -99,12 +99,14 @@ function TablePart({
   tableKey,
   animate,
   streaming,
+  startOnMount,
 }: {
   part: AgentResponsePart;
   expandable: boolean;
   tableKey: string;
   animate: boolean;
   streaming: boolean;
+  startOnMount: boolean;
 }) {
   const isMobile = useIsMobile();
   const [expanded, setExpanded] = useState(false);
@@ -113,7 +115,7 @@ function TablePart({
   const collapsedRowLimit = isMobile ? MOBILE_PREVIEW_ROW_LIMIT : DESKTOP_PREVIEW_ROW_LIMIT;
   const canToggleRows = expandable && rows.length > collapsedRowLimit;
   const targetRows = canToggleRows && !expanded ? rows.slice(0, collapsedRowLimit) : rows;
-  const playback = useTableTypewriter(targetRows.length, animate && !expanded, streaming);
+  const playback = useTableTypewriter(targetRows.length, animate && !expanded, streaming, startOnMount, startOnMount ? 160 : 96);
   const visibleRows = targetRows.slice(0, playback.count);
   const hasCompleteRows = typeof part.row_count !== 'number' || part.row_count <= rows.length;
   const rowCountLabel = playback.isTyping
@@ -218,10 +220,29 @@ function InsightPart({ part, animate }: { part: AgentResponsePart; animate: bool
   );
 }
 
-function NoticePart({ part }: { part: AgentResponsePart }) {
+function SummaryPart({ part, animate, streaming }: { part: AgentResponsePart; animate: boolean; streaming: boolean }) {
+  const metrics = part.metrics ?? [];
+  const playback = useTableTypewriter(metrics.length, animate, streaming, true, 240);
+  return (
+    <section className="rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm" aria-label={part.title || '汇总'}>
+      {part.title && <h3 className="mb-2 text-sm font-medium text-slate-700">{part.title}</h3>}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {metrics.slice(0, playback.count).map((metric) => (
+          <div key={metric.key} className="min-w-0">
+            <div className="truncate text-xs text-slate-500">{metric.label || metric.key}</div>
+            <div className="truncate text-sm font-medium text-slate-800">{displayDecimal(metric.value, metric.unit)}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function NoticePart({ part, animate, streaming }: { part: AgentResponsePart; animate: boolean; streaming: boolean }) {
+  const playback = useTypewriter(part.message ?? '', animate, streaming, true);
   if (!part.message || !part.severity) return null;
 
-  return <Alert title={part.title} description={part.message} type={part.severity} showIcon />;
+  return <Alert title={part.title} description={playback.text} type={part.severity} showIcon aria-live={animate ? 'off' : undefined} />;
 }
 
 function QuestionnaireCard({
@@ -347,6 +368,9 @@ export function ResponsePartsRenderer({
   const hideConfirmationStatus = response.result_status === 'needs_confirmation'
     && questionnaires.length > 0 && questionnaires.every((part) => part.status !== 'pending');
   const payloadActionsBlocked = response.result_status === 'failed' || response.result_status === 'unavailable';
+  const paceStructured = animate && !payloadActionsBlocked && response.result_status !== 'needs_confirmation'
+    && response.parts.some(part => part.kind === 'table' || (part.kind === 'summary' && part.metrics?.length));
+  const partPlayback = useTableTypewriter(response.parts.length, paceStructured && response.parts.length > 1, streaming, true, 240);
   const promptActions = response.actions?.filter((action) => (
     action.kind === 'prompt' && typeof action.params?.message === 'string'
   )) ?? [];
@@ -390,25 +414,14 @@ export function ResponsePartsRenderer({
         </div>
       )}
       {response.parts.map((part, index) => {
+        if (index >= partPlayback.count) return null;
         if (isQuestionnairePart(part)) {
           return <QuestionnaireCard key={`questionnaire-${part.run_id}-${part.clarification_id}`} part={part}
             sourceTurnId={response.source_turn_id} onInteraction={onInteraction}
             disabled={questionnaireDisabled || payloadActionsBlocked} />;
         }
         if (part.kind === 'summary' && part.metrics?.length) {
-          return (
-            <section key={`summary-${index}`} className="rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm" aria-label={part.title || '汇总'}>
-              {part.title && <h3 className="mb-2 text-sm font-medium text-slate-700">{part.title}</h3>}
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {part.metrics.map((metric) => (
-                  <div key={metric.key} className="min-w-0">
-                    <div className="truncate text-xs text-slate-500">{metric.label || metric.key}</div>
-                    <div className="truncate text-sm font-medium text-slate-800">{displayDecimal(metric.value, metric.unit)}</div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          );
+          return <SummaryPart key={`summary-${index}`} part={part} animate={paceStructured} streaming={streaming} />;
         }
 
         if (part.kind === 'table') {
@@ -420,6 +433,7 @@ export function ResponsePartsRenderer({
               tableKey={part.table_id ?? String(index)}
               animate={animate}
               streaming={streaming}
+              startOnMount={paceStructured}
             />
           );
         }
@@ -429,7 +443,7 @@ export function ResponsePartsRenderer({
         }
 
         if (part.kind === 'notice') {
-          return <NoticePart key={`notice-${part.code ?? index}`} part={part} />;
+          return <NoticePart key={`notice-${part.code ?? index}`} part={part} animate={paceStructured} streaming={streaming} />;
         }
 
         if (part.kind === 'clarification' && part.message) {

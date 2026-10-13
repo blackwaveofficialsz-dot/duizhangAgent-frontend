@@ -83,17 +83,30 @@ export function ChatWindow() {
   );
   const messages = session?.messages ?? [];
   const isAgui = session?.conversationMode === 'agui';
-  const [liveInsightMessageId, setLiveInsightMessageId] = useState<string | null>(null);
-  useEffect(() => setLiveInsightMessageId(null), [activeSessionId]);
+  const [liveMessageIds, setLiveMessageIds] = useState<Set<string>>(() => new Set());
   useEffect(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role === 'assistant' && message.agui && message.streaming) {
-        setLiveInsightMessageId(message.id);
-        break;
-      }
-    }
-  }, [messages]);
+    // Store events can complete within one React batch, before a streamed render.
+    const rememberLiveMessages = (state: ReturnType<typeof useChatStore.getState>, previous?: ReturnType<typeof useChatStore.getState>) => {
+      const current = state.sessions.find(item => item.id === state.activeSessionId);
+      const previousSession = previous?.sessions.find(item => item.id === previous.activeSessionId);
+      const switched = previous && state.activeSessionId !== previous.activeSessionId;
+      if (previous && !switched && current?.messages === previousSession?.messages
+        && state.loadingHistory === previous.loadingHistory) return;
+      const ids = new Set(current?.messages.map(message => message.id));
+      const renamed = switched && previousSession?.messages.some(message => ids.has(message.id));
+      setLiveMessageIds(existing => {
+        const next = new Set(switched && !renamed ? [] : [...existing].filter(id => ids.has(id)));
+        if (!state.loadingHistory && !switched) {
+          for (const message of current?.messages ?? []) {
+            if (message.role === 'assistant' && message.agui && message.streaming) next.add(message.id);
+          }
+        }
+        return next.size === existing.size && [...next].every(id => existing.has(id)) ? existing : next;
+      });
+    };
+    rememberLiveMessages(useChatStore.getState());
+    return useChatStore.subscribe(rememberLiveMessages);
+  }, []);
   const unresolvedAgui = messages.find((message) => message.agui && isAguiUnresolved(message.agui.status));
   const hiddenToolCallIds = useMemo(() => {
     const hidden = new Set<string>();
@@ -445,6 +458,8 @@ export function ChatWindow() {
           const task = msg.taskId && !replayedAguiRunIds.has(msg.taskId) ? taskById.get(msg.taskId) : undefined;
           const retryPrompt = previousQuestionByMessageId.get(msg.id)?.trim();
           const isActiveAgui = msg.agui?.status === 'connecting' || msg.agui?.status === 'running';
+          const animateMessage = isAgui && liveMessageIds.has(msg.id)
+            && ['connecting', 'running', 'completed'].includes(msg.agui?.status ?? '');
           const showAguiStatus = Boolean(
             msg.agui
             && msg.agui.status !== 'completed'
@@ -459,7 +474,7 @@ export function ChatWindow() {
                 message={msg}
                 sessionId={activeSessionId!}
                 canDelete={!unresolvedAgui}
-                animateText={isAgui && msg.id === lastMessage?.id}
+                animateText={animateMessage}
                 loadingAction={isActiveAgui && msg.agui && canReconnectAguiRun(msg.agui.runId) ? (
                   <Button
                     autoInsertSpace={false}
@@ -478,9 +493,9 @@ export function ChatWindow() {
                 structuredContent={msg.role === 'assistant' && msg.agentResponse ? (
                   <ResponsePartsRenderer
                     response={msg.agentResponse}
-                    animate={isAgui && msg.id === lastMessage?.id}
+                    animate={animateMessage}
                     streaming={Boolean(msg.streaming)}
-                    animateInsights={isAgui && liveInsightMessageId === msg.id}
+                    animateInsights={animateMessage}
                     onPrompt={async (message) => {
                       const sent = await sendMessage(message);
                       if (sent === false) throw new Error('follow-up prompt send failed');

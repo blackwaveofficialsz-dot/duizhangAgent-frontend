@@ -274,7 +274,7 @@ export function MessageBubble({ message, sessionId, hideStructuredContent = fals
   const canAnimate = animateText && !isUser && Boolean(message.agui)
     && ['connecting', 'running', 'completed'].includes(message.agui!.status)
     && !message.agentResponse && !complexMarkdown && !reportDownloads.length && !knowledgeDraft;
-  const playback = useTypewriter(visibleContent, canAnimate, Boolean(message.streaming));
+  const playback = useTypewriter(visibleContent, canAnimate, Boolean(message.streaming), animateText);
   const canCollapseLongContent = !isUser && !hasTable && !message.streaming && !playback.isTyping && (visibleContent?.length || 0) > 1200;
   const tableTitleMatch = contentForDisplay.match(/\*\*(.+?)\*\*/);
   const tableTitle = tableTitleMatch ? tableTitleMatch[1].replace(/[\\/:*?"<>|]/g, '_') : '表格数据';

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { StrictMode } from 'react';
 
 import { useAuthStore } from '../store/authStore';
 import { useChatStore } from '../store/chatStore';
@@ -588,6 +589,80 @@ describe('ChatWindow streaming performance', () => {
           streaming: false, agui: { runId: 'run-history', status: 'completed' }, agentResponse: insight }] }],
     }));
     expect(container.querySelectorAll('.agui-insight-reveal')).toHaveLength(0);
+  });
+
+  it('plays an instant completed overview without replaying history loaded or switched later', () => {
+    let time = 0;
+    let frameId = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.spyOn(performance, 'now').mockImplementation(() => time);
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.set(++frameId, callback);
+      return frameId;
+    }));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn((id: number) => frames.delete(id)));
+    const overview = {
+      version: 1 as const, domain: 'analytics', task: 'live_orders_summary', result_status: 'partial' as const,
+      result_id: 'live-overview', source_turn_id: 'live-turn',
+      parts: [{ kind: 'summary', title: '实时经营概览', metrics: [
+        { key: 'customer_paid_net', label: '客户实付净额', value: '待核验' },
+      ] }, { kind: 'table', table_id: 'live_order_store_overview', columns: [{ key: 'store_name', label: '门店' }],
+        preview_rows: [{ store_name: '新结果门店' }] }],
+    };
+    useChatStore.setState({ sessions: [{
+      id: 'session-1', title: '当前会话', createdAt: 0, conversationMode: 'agui', messages: [userMessage],
+    }] });
+    let subscriptions = 0;
+    const subscribe = useChatStore.subscribe;
+    vi.spyOn(useChatStore, 'subscribe').mockImplementation((listener) => {
+      subscriptions += 1;
+      const unsubscribe = subscribe(listener);
+      return () => { subscriptions -= 1; unsubscribe(); };
+    });
+    const { unmount } = render(<StrictMode><ChatWindow /></StrictMode>);
+    expect(subscriptions).toBe(1);
+
+    act(() => {
+      const store = useChatStore.getState();
+      store.addMessage('session-1', { id: 'instant-live', role: 'assistant', content: '', createdAt: 3,
+        streaming: true, agui: { runId: 'instant-run', status: 'running' } });
+      store.setMessageAgentResponse('session-1', 'instant-live', overview);
+      store.setMessageStreaming('session-1', 'instant-live', false);
+      store.setMessageAgui('session-1', 'instant-live', { runId: 'instant-run', status: 'completed' });
+    });
+    const receivedMessages = useChatStore.getState().sessions[0].messages;
+    expect(receivedMessages[receivedMessages.length - 1]?.streaming).toBe(false);
+    expect(screen.queryByText('客户实付净额')).toBeNull();
+    expect(screen.queryByText('新结果门店')).toBeNull();
+    act(() => {
+      const store = useChatStore.getState();
+      store.updateSessionId('session-1', 'canonical-session');
+      store.addMessage('canonical-session', { ...userMessage, id: 'next-user', content: '再查一次' });
+      store.addMessage('canonical-session', { id: 'next-assistant', role: 'assistant', content: '', createdAt: 4,
+        streaming: true, agui: { runId: 'next-run', status: 'running' } });
+    });
+    expect(screen.queryByText('新结果门店')).toBeNull();
+    for (let index = 0; index < 8; index += 1) act(() => {
+      time += 240;
+      const callbacks = [...frames.values()];
+      frames.clear();
+      callbacks.forEach(callback => callback(time));
+    });
+    expect(screen.getByText('客户实付净额')).toBeTruthy();
+    expect(screen.getByText('新结果门店')).toBeTruthy();
+
+    act(() => useChatStore.setState({ activeSessionId: 'loaded-history', loadingHistory: true,
+      sessions: [{ id: 'loaded-history', title: '历史会话', createdAt: 0, conversationMode: 'agui', messages: [] }] }));
+    act(() => useChatStore.setState({ loadingHistory: false, sessions: [{
+      id: 'loaded-history', title: '历史会话', createdAt: 0, conversationMode: 'agui', loaded: true,
+      messages: [{ id: 'history-overview', role: 'assistant', content: '', createdAt: 1, streaming: false,
+        agui: { runId: 'history-run', status: 'completed' }, agentResponse: overview }],
+    }] }));
+    expect(screen.getByText('客户实付净额')).toBeTruthy();
+    expect(screen.getByText('新结果门店')).toBeTruthy();
+    unmount();
+    expect(subscriptions).toBe(0);
+    expect(frames.size).toBe(0);
   });
 
   it('hides same-turn tool cards behind public activity while preserving legacy cards', () => {

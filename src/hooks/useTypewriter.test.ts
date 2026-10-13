@@ -38,7 +38,7 @@ describe('display-only typewriter', () => {
   });
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  it('receives full text immediately but displays only four graphemes per refresh', () => {
+  it('receives full text immediately but displays only two graphemes per refresh', () => {
     const source = '真实流式接收与前端轻量打字机。'.repeat(20);
     const { result, rerender } = start();
     rerender({ text: source, streaming: true, enabled: true });
@@ -50,7 +50,7 @@ describe('display-only typewriter', () => {
     const prefix = result.current.text;
     rerender({ text: source + '新片段', streaming: true, enabled: true });
     expect(result.current.text).toBe(prefix);
-    for (let i = 0; i < 100; i++) advance();
+    for (let i = 0; i < 160; i++) advance();
     expect(result.current.text).toBe(source + '新片段');
     expect(frames.size).toBe(0);
   });
@@ -69,7 +69,7 @@ describe('display-only typewriter', () => {
     const { result, rerender } = start();
     rerender({ text: '销售数据'.repeat(8), streaming: true, enabled: true });
     advance(32);
-    expect(result.current.text).toBe('销售数据');
+    expect(result.current.text).toBe('销售');
   });
 
   it('keeps the base pace when the backlog does not require acceleration', () => {
@@ -77,10 +77,10 @@ describe('display-only typewriter', () => {
     const source = '销售数据'.repeat(20);
     rerender({ text: source, streaming: true, enabled: true });
     advance(80);
-    expect(result.current.text).toBe('销售数据');
+    expect(result.current.text).toBe('销售');
     rerender({ text: source, streaming: false, enabled: true });
     advance(600);
-    expect(result.current.text).toBe('销售数据销售数据');
+    expect(result.current.text).toBe('销售数据');
     expect(result.current.isTyping).toBe(true);
   });
 
@@ -120,6 +120,7 @@ describe('display-only typewriter', () => {
     rerender({ text: '断线前已经收到的内容，重连新增', streaming: true, enabled: true });
     expect(result.current.text).toBe('断线前已经收到的内容');
     advance(1000);
+    advance();
     advance();
     expect(result.current.text).toBe('断线前已经收到的内容，重连新增');
   });
@@ -203,6 +204,128 @@ describe('display-only typewriter', () => {
   it('does not replay structured table rows from history', () => {
     const history = startTable(10, false, true);
     expect(history.result.current).toEqual({ count: 10, isTyping: false });
+    expect(frames.size).toBe(0);
+  });
+
+  it('plays newly received completed text without requiring a streamed render', () => {
+    const source = '后端瞬间结束，前端仍然继续逐字显示。';
+    const { result } = renderHook(() => useTypewriter(source, true, false, true));
+    expect(result.current).toEqual({ text: '', isTyping: true });
+    advance();
+    expect(result.current.text.length).toBeGreaterThan(0);
+    expect(result.current.text.length).toBeLessThan(source.length);
+    advance(10_000);
+    expect(result.current).toEqual({ text: source, isTyping: false });
+    expect(frames.size).toBe(0);
+  });
+
+  it('plays newly mounted completed rows and clears playback on unmount', () => {
+    const { result, unmount } = renderHook(() => useTableTypewriter(3, true, false, true));
+    expect(result.current).toEqual({ count: 0, isTyping: true });
+    advance(160);
+    expect(result.current).toEqual({ count: 1, isTyping: true });
+    unmount();
+    expect(frames.size).toBe(0);
+  });
+
+  it.each(['reduced motion', 'hidden tab'])('shows fresh completed content directly for %s without replaying later', (reason) => {
+    if (reason === 'reduced motion') motion.matches = true;
+    else vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const text = renderHook(() => useTypewriter('完整已收到文本', true, false, true));
+    const rows = renderHook(() => useTableTypewriter(3, true, false, true));
+    expect(text.result.current).toEqual({ text: '完整已收到文本', isTyping: false });
+    expect(rows.result.current).toEqual({ count: 3, isTyping: false });
+    expect(frames.size).toBe(0);
+    act(() => {
+      motion.matches = false;
+      motion.dispatchEvent(new Event('change'));
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(text.result.current.text).toBe('完整已收到文本');
+    expect(rows.result.current.count).toBe(3);
+    expect(frames.size).toBe(0);
+  });
+
+  it('releases completed playback listeners and restores them only for new content', () => {
+    const addedMotion = vi.spyOn(motion, 'addEventListener');
+    const removedMotion = vi.spyOn(motion, 'removeEventListener');
+    const addedDocument = vi.spyOn(document, 'addEventListener');
+    const removedDocument = vi.spyOn(document, 'removeEventListener');
+    const visibilityCalls = (calls: unknown[][]) => calls.filter(call => call[0] === 'visibilitychange').length;
+    const { result, rerender } = renderHook(({ text, total }) => ({
+      text: useTypewriter(text, true, false, true),
+      rows: useTableTypewriter(total, true, false, true),
+    }), { initialProps: { text: '已收到内容', total: 3 } });
+    advance(10_000);
+    expect(result.current.text).toEqual({ text: '已收到内容', isTyping: false });
+    expect(result.current.rows).toEqual({ count: 3, isTyping: false });
+    expect(frames.size).toBe(0);
+    expect(removedMotion.mock.calls.length).toBe(addedMotion.mock.calls.length);
+    expect(visibilityCalls(removedDocument.mock.calls)).toBe(visibilityCalls(addedDocument.mock.calls));
+
+    rerender({ text: '已收到内容，新增内容仍逐字显示', total: 5 });
+    expect(result.current.text.isTyping).toBe(true);
+    expect(result.current.rows).toEqual({ count: 3, isTyping: true });
+    const registrations = addedMotion.mock.calls.length;
+    advance();
+    expect(addedMotion.mock.calls.length).toBe(registrations);
+    expect(result.current.text.text).not.toBe('已收到内容，新增内容仍逐字显示');
+    advance(10_000);
+    expect(result.current.text.isTyping).toBe(false);
+    expect(result.current.rows).toEqual({ count: 5, isTyping: false });
+    expect(removedMotion.mock.calls.length).toBe(addedMotion.mock.calls.length);
+    expect(visibilityCalls(removedDocument.mock.calls)).toBe(visibilityCalls(addedDocument.mock.calls));
+    expect(frames.size).toBe(0);
+  });
+
+  it.each([
+    ['text', 'reduced motion'], ['table', 'reduced motion'],
+    ['text', 'hidden tab'], ['table', 'hidden tab'],
+  ])('resumes %s playback after %s flushed and removed its listeners', (kind, environment) => {
+    const addedMotion = vi.spyOn(motion, 'addEventListener');
+    const removedMotion = vi.spyOn(motion, 'removeEventListener');
+    const addedDocument = vi.spyOn(document, 'addEventListener');
+    const removedDocument = vi.spyOn(document, 'removeEventListener');
+    const expectNoListeners = () => {
+      expect(removedMotion.mock.calls.length).toBe(addedMotion.mock.calls.length);
+      expect(removedDocument.mock.calls.filter(call => call[0] === 'visibilitychange').length)
+        .toBe(addedDocument.mock.calls.filter(call => call[0] === 'visibilitychange').length);
+    };
+    const { result, rerender, unmount } = renderHook(({ text, total }) => ({
+      text: useTypewriter(text, true, false, true),
+      rows: useTableTypewriter(total, true, false, true),
+    }), { initialProps: { text: '先收到的完整内容', total: 3 } });
+    act(() => {
+      if (environment === 'reduced motion') {
+        motion.matches = true;
+        motion.dispatchEvent(new Event('change'));
+      } else {
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    expect(result.current.text).toEqual({ text: '先收到的完整内容', isTyping: false });
+    expect(result.current.rows).toEqual({ count: 3, isTyping: false });
+    expect(frames.size).toBe(0);
+    expectNoListeners();
+    act(() => {
+      motion.matches = false;
+      motion.dispatchEvent(new Event('change'));
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    const complete = '先收到的完整内容，恢复后新增的文字继续播放';
+    rerender({ text: complete, total: 5 });
+    if (kind === 'text') expect(result.current.text).toEqual({ text: '先收到的完整内容', isTyping: true });
+    else expect(result.current.rows).toEqual({ count: 3, isTyping: true });
+    advance(10_000);
+    expect(result.current.text).toEqual({ text: complete, isTyping: false });
+    expect(result.current.rows).toEqual({ count: 5, isTyping: false });
+    expectNoListeners();
+    expect(frames.size).toBe(0);
+    unmount();
+    expectNoListeners();
     expect(frames.size).toBe(0);
   });
 
