@@ -10,6 +10,8 @@ const analyticsApi = vi.hoisted(() => ({
   listStoreScopeTree: vi.fn(),
   listShopMappings: vi.fn(),
 }));
+const liveApi = vi.hoisted(() => ({ fetchLiveOrdersSummary: vi.fn() }));
+vi.mock('../../api/liveOrders', () => liveApi);
 
 const renderedCharts = vi.hoisted(() => new Map<HTMLElement, { series: Array<{ data: Array<number | null> }> }>());
 vi.mock('echarts/core', () => ({
@@ -141,6 +143,7 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  liveApi.fetchLiveOrdersSummary.mockResolvedValue({ data: { sale_order_count: 7, received_verified_paid_net: '90.1200' }, received_amount_availability: { status: 'available', basis: 'verified_received_push_events' }, freshness: {}, coverage: { status: 'partial' } });
   operationsApi.fetchOperationsOverview.mockReset().mockImplementation(defaultOverviewRequest);
   dailyFactsApi.getOrderDailyFacts.mockRejectedValue(new Error('unsupported'));
   dailyFactsApi.getMealDailyFacts.mockRejectedValue(new Error('unsupported'));
@@ -540,6 +543,27 @@ describe('DashboardPage realtime refresh', () => {
     vi.setSystemTime(new Date('2026-08-12T04:00:00Z'));
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
   });
+  it('consumes the received summary when published order metrics are missing', async () => {
+    const base = await defaultOverviewRequest();
+    operationsApi.fetchOperationsOverview.mockResolvedValue({ ...base, metrics: Object.fromEntries(Object.keys(base.metrics).map(key => [key, { current: null }])) });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText('¥90.1200')).toBeTruthy();
+    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-08-12', storeKeys: [] }));
+  });
+  it('does not block received orders behind a pending formal summary', async () => {
+    operationsApi.fetchOperationsOverview.mockReturnValue(new Promise(() => {}));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText('¥90.1200')).toBeTruthy();
+  });
+  it('keeps published history available when only the received query is forbidden', async () => {
+    liveApi.fetchLiveOrdersSummary.mockRejectedValueOnce(Object.assign(new Error('analytics_scope_denied'), { status: 403 }));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText('暂无权限查看已接收订单')).toBeTruthy();
+    expect(await screen.findByText('¥1,000.00')).toBeTruthy();
+    expect(screen.queryByText('无权访问经营数据')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
+    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledTimes(1);
+  });
 
   it('shows successful unavailable publication as waiting rather than a failed request', async () => {
     const base = await defaultOverviewRequest();
@@ -894,6 +918,7 @@ describe('DashboardPage meal metric switch', () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
 
     await chooseScope('门店A');
+    await waitFor(() => expect(liveApi.fetchLiveOrdersSummary).toHaveBeenLastCalledWith(expect.objectContaining({ storeKeys: ['801'] })));
     const sourceButtons = await screen.findAllByText('堂食/外卖');
     fireEvent.click(sourceButtons[sourceButtons.length - 1]);
 
@@ -1236,6 +1261,7 @@ describe('DashboardPage meal metric switch', () => {
     analyticsApi.getMealPeriods.mockClear();
     analyticsApi.getMealPeriodTrend.mockClear();
     analyticsApi.getMealPeriodTurnover.mockClear();
+    liveApi.fetchLiveOrdersSummary.mockClear();
 
     await chooseScope('空部门');
 
@@ -1244,6 +1270,7 @@ describe('DashboardPage meal metric switch', () => {
     expect(analyticsApi.getMealPeriods).not.toHaveBeenCalled();
     expect(analyticsApi.getMealPeriodTrend).not.toHaveBeenCalled();
     expect(analyticsApi.getMealPeriodTurnover).not.toHaveBeenCalled();
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
 
   it('loads both meal datasets once and does not request again when switching metrics', async () => {

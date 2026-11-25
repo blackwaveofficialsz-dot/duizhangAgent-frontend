@@ -15,6 +15,7 @@ import { useChannelStore } from '../../store/channelStore';
 import { useEmployeeStore } from '../../store/employeeStore';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { usePolling } from '../../hooks/usePolling';
+import { ReceivedOrdersOverview } from './ReceivedOrdersOverview';
 import { currentBeijingDate } from '../../utils/time';
 import { EmployeeMultiSelect } from '../EmployeeMultiSelect';
 import {
@@ -716,6 +717,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   if (permissionDenied) return <div role="alert">暂无权限查看经营数据</div>;
   return (
     <div className="space-y-4">
+    <ReceivedOrdersOverview date={comparisonRange[1]} storeKeys={[]} enabled />
     <Card>
       <MobileInlineFilter
         summary={`${dimText} · ${periodText}`}
@@ -728,7 +730,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         {renderControls(false)}
       </div>
       {periodDescription && <p className="mb-3 text-xs text-slate-400">{periodDescription}</p>}
-      {includeCurrent && <p className="mb-3 text-xs text-slate-400">今日为已接收订单的实时暂估，每5分钟更新</p>}
+      {includeCurrent && <p className="mb-3 text-xs text-slate-400">今日经营指标以已发布订单快照为准</p>}
       <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <PeriodMetricCard
           label="营业额"

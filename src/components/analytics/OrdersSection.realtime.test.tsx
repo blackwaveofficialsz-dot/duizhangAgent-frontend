@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const api = vi.hoisted(() => ({ getBusinessReport: vi.fn(), getOrders: vi.fn(), getOrdersInsight: vi.fn(), listPlatformDim: vi.fn(), saveOrdersInsightCandidate: vi.fn() }));
 const overviewApi = vi.hoisted(() => ({ fetchOperationsOverview: vi.fn() }));
 const facts = vi.hoisted(() => ({ getOrderDailyFacts: vi.fn() }));
+const liveApi = vi.hoisted(() => ({ fetchLiveOrdersSummary: vi.fn() }));
+vi.mock('../../api/liveOrders', () => liveApi);
 vi.mock('../../api/analytics', () => api);
 vi.mock('../../api/analyticsDailyFacts', () => facts);
 vi.mock('../../features/operations-analysis/api/client', () => overviewApi);
@@ -29,10 +31,25 @@ beforeEach(() => {
   overviewApi.fetchOperationsOverview.mockResolvedValue(overview());
   facts.getOrderDailyFacts.mockResolvedValue([]);
   api.listPlatformDim.mockResolvedValue([]);
+  liveApi.fetchLiveOrdersSummary.mockResolvedValue({ data: { sale_order_count: 7, received_verified_paid_net: '88.1200' }, received_amount_availability: { status: 'available', basis: 'verified_received_push_events' }, freshness: {}, coverage: { status: 'partial' } });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('OrdersSection realtime orders', () => {
+  it('consumes received orders while the published summary is missing', async () => {
+    const missing = overview();
+    Object.values(missing.metrics).forEach(metric => { Object.assign(metric, { current: null }); });
+    missing.sections.orders.status = 'missing'; missing.completeness.status = 'missing';
+    overviewApi.fetchOperationsOverview.mockResolvedValue(missing);
+    render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
+    expect(screen.getByText('¥88.1200')).toBeTruthy();
+    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-08-12', storeKeys: [] }));
+  });
+  it('does not wait for a slow formal summary before showing received orders', async () => {
+    overviewApi.fetchOperationsOverview.mockReturnValue(new Promise(() => {}));
+    render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
+    expect(screen.getByText('¥88.1200')).toBeTruthy();
+  });
   it('opens today and explicitly includes current orders', async () => {
     render(<OrdersSection show={vi.fn()} canManage={false} />);
     await flush();

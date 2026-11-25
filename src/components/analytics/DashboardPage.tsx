@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import { addMoney, sumMoney } from "../../utils/money";
 import { formatBeijingTime } from "../../utils/time";
 import { usePolling } from "../../hooks/usePolling";
+import { ReceivedOrdersOverview } from "./ReceivedOrdersOverview";
 import {
   Alert as AntAlert,
   Button as AntButton,
@@ -2513,10 +2514,11 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   return (
     <div className="space-y-4">
       {realtimeRange ? <div role="status" className="text-xs text-slate-500">
-        {freshness?.mode === "realtime" ? "实时订单（持续更新）" : "含今日订单"} · 每5分钟自动更新
+        经营汇总快照 · 每5分钟自动更新
         {freshness?.data_as_of ? ` · 数据截至 ${formatBeijingTime(freshness.data_as_of, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}
         {refreshFailed ? " · 更新失败，保留上次数据" : freshness?.status === "unavailable" ? " · 今日数据尚未就绪，等待发布" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
       </div> : null}
+      <ReceivedOrdersOverview date={dateTo} storeKeys={scopeKeys.includes("ALL") ? [] : shopKeys} enabled={scopeKeys.includes("ALL") || shopKeys.length > 0} />
       <div className="rounded-lg border border-slate-200 bg-white p-4 md:p-5">
         <div className="md:hidden">
           <div className="mb-2 flex items-center justify-between gap-2">
