@@ -105,7 +105,7 @@ describe('apiFetch refresh retry', () => {
       return Promise.resolve(jsonResponse({ detail: 'expired' }, 401));
     }));
 
-    await expect(apiFetch('/api/v1/protected')).rejects.toThrow('登录已过期，请重新登录');
+    await expect(apiFetch('/api/v1/protected')).rejects.toMatchObject({ message: '登录已过期，请重新登录', status: 401 });
 
     expect(useAuthStore.getState()).toMatchObject({
       token: null,

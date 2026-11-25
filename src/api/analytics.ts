@@ -1,6 +1,7 @@
 // 经营分析 API（P1：订单统计 / 店铺映射 / 平台字典）。
 
 import { apiFetch } from './client';
+import { useAuthStore } from '../store/authStore';
 import type { StoreScopeNode } from '../components/analytics/storeScope';
 import type { TrendGranularity, TrendMovingAverageMeta } from '../components/analytics/trendPeriod';
 import { addMoney, sumMoney } from '../utils/money';
@@ -25,6 +26,11 @@ function completeTrendCacheKey(cacheKey: string, options: AnalyticsRequestOption
   return options.includeStoreTrends ? `${cacheKey}:store-trends-v1` : cacheKey;
 }
 
+function isAnalyticsAccessError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'status' in error
+    && (error.status === 401 || error.status === 403);
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = `请求失败（${res.status}）`;
@@ -34,7 +40,7 @@ async function json<T>(res: Response): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    throw Object.assign(new Error(detail), { status: res.status });
   }
   return res.json() as Promise<T>;
 }
@@ -103,11 +109,24 @@ type DailyDeltaBucket<T> = {
 };
 
 function currentTenantId(): string {
+  const tenantId = useAuthStore.getState().tenantId;
+  if (tenantId) return tenantId;
   try {
     return localStorage.getItem('auth_tenant_id') || 'anonymous';
   } catch {
     return 'anonymous';
   }
+}
+
+function analyticsPrincipalKey(): string {
+  const state = useAuthStore.getState();
+  let userId = state.userId;
+  if (!userId) {
+    try { userId = localStorage.getItem('auth_user_id') || 'anonymous'; }
+    catch { userId = 'anonymous'; }
+  }
+  return [currentTenantId(), userId, state.activeWorkspaceId || '']
+    .map(encodeURIComponent).join(':');
 }
 
 function todayKey(): string {
@@ -116,7 +135,7 @@ function todayKey(): string {
 }
 
 function analyticsCacheKey(namespace: string, cacheKey: string): string {
-  return `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:${namespace}:${cacheKey}`;
+  return `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${analyticsPrincipalKey()}:${namespace}:${cacheKey}`;
 }
 
 function analyticsCacheDateFromKey(key: string): string | null {
@@ -150,7 +169,7 @@ function isFreshEntry<T>(entry: AnalyticsFrontendCacheEntry<T>): boolean {
 
 function clearLocalAnalyticsCache(namespace?: string, cacheKey?: string): void {
   try {
-    const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:`;
+    const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${analyticsPrincipalKey()}:`;
     const prefix = namespace ? `${tenantPrefix}${namespace}:` : tenantPrefix;
     const exactKey = namespace && cacheKey ? analyticsCacheKey(namespace, cacheKey) : null;
     for (let index = localStorage.length - 1; index >= 0; index -= 1) {
@@ -238,7 +257,7 @@ async function deleteIndexedAnalyticsKey(storageKey: string): Promise<void> {
 async function clearIndexedAnalyticsCache(namespace?: string, cacheKey?: string): Promise<void> {
   const db = await openIndexedCacheDb();
   if (!db) return;
-  const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${currentTenantId()}:`;
+  const tenantPrefix = `${ANALYTICS_CACHE_PREFIX}:${todayKey()}:${analyticsPrincipalKey()}:`;
   const prefix = namespace ? `${tenantPrefix}${namespace}:` : tenantPrefix;
   const exactKey = namespace && cacheKey ? analyticsCacheKey(namespace, cacheKey) : null;
   try {
@@ -420,11 +439,13 @@ function writeAnalyticsCache<T>(namespace: string, cacheKey: string, data: T, tt
 }
 
 async function writeIndexedAnalyticsCache<T>(namespace: string, cacheKey: string, data: T, ttlSeconds: number): Promise<void> {
+  const storageKey = analyticsCacheKey(namespace, cacheKey);
+  const entry = cacheEntry(namespace, cacheKey, data, ttlSeconds);
   const db = await openIndexedCacheDb();
   if (!db) return;
   try {
     const tx = db.transaction(INDEXED_ANALYTICS_CACHE_STORE, 'readwrite');
-    tx.objectStore(INDEXED_ANALYTICS_CACHE_STORE).put(cacheEntry(namespace, cacheKey, data, ttlSeconds), analyticsCacheKey(namespace, cacheKey));
+    tx.objectStore(INDEXED_ANALYTICS_CACHE_STORE).put(entry, storageKey);
     await idbTransactionDone(tx);
     await pruneIndexedAnalyticsCache();
   } catch {
@@ -481,13 +502,15 @@ function writeSmallDailyBucketFallback<T>(namespace: string, paramsHash: string,
 }
 
 async function writeDailyBucket<T>(namespace: string, paramsHash: string, bucket: DailyDeltaBucket<T>, ttlSeconds: number): Promise<void> {
+  const principal = analyticsPrincipalKey();
   bucket.lastAccessedAt = new Date().toISOString();
   pruneDailyBucket(bucket);
   await writeIndexedAnalyticsCache(namespace, paramsHash, bucket, ttlSeconds);
-  writeSmallDailyBucketFallback(namespace, paramsHash, bucket, ttlSeconds);
+  if (analyticsPrincipalKey() === principal) writeSmallDailyBucketFallback(namespace, paramsHash, bucket, ttlSeconds);
 }
 
 async function cachedJson<T>(url: string, options: AnalyticsRequestOptions = {}): Promise<T> {
+  const principal = analyticsPrincipalKey();
   const cacheKey = options.cacheKey || url;
   const namespace = options.namespace || 'analytics.general';
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_ANALYTICS_CACHE_TTL_SECONDS;
@@ -502,12 +525,12 @@ async function cachedJson<T>(url: string, options: AnalyticsRequestOptions = {})
     if (indexedCached) return indexedCached;
   }
   const inflightKey = analyticsCacheKey(namespace, cacheKey);
-  const inflight = inflightAnalyticsRequests.get(inflightKey);
+  const inflight = options.signal ? undefined : inflightAnalyticsRequests.get(inflightKey);
   if (inflight) return inflight as Promise<T>;
   const request = apiFetch(url, { signal: options.signal })
     .then((res) => json<T>(res))
     .then(async (data) => {
-      if (!options.signal?.aborted) {
+      if (!options.signal?.aborted && analyticsPrincipalKey() === principal) {
         const wroteLocal = writeAnalyticsCache(namespace, cacheKey, data, ttlSeconds);
         if (!wroteLocal) {
           try {
@@ -523,9 +546,9 @@ async function cachedJson<T>(url: string, options: AnalyticsRequestOptions = {})
       return data;
     })
     .finally(() => {
-      inflightAnalyticsRequests.delete(inflightKey);
+      if (!options.signal) inflightAnalyticsRequests.delete(inflightKey);
     });
-  inflightAnalyticsRequests.set(inflightKey, request);
+  if (!options.signal) inflightAnalyticsRequests.set(inflightKey, request);
   return request;
 }
 
@@ -755,8 +778,8 @@ function revenueTrendCacheKey(dateFrom: string, dateTo: string, storeKey: string
   return `/api/v1/analytics/trends/revenue?${params.toString()}`;
 }
 
-function revenueTrendBucketKey(storeKey: string, sourceType: string): string {
-  return `${storeKey}:${sourceType}`;
+function revenueTrendBucketKey(storeKey: string, sourceType: string, includeCurrent = false): string {
+  return `${storeKey}:${sourceType}${includeCurrent ? ':include-current' : ''}`;
 }
 
 function dailyRevenueMovingAverages(points: RevenueTrendPoint[]): TrendMovingAverageMeta[] {
@@ -783,10 +806,11 @@ async function getRevenueTrendFallback(dateFrom: string, dateTo: string, storeKe
   });
 }
 
-async function getRevenueTrendDelta(dateFrom: string, dateTo: string, storeKey: string, sourceType: string, options: AnalyticsRequestOptions): Promise<RevenueTrendResult> {
+async function getRevenueTrendDelta(dateFrom: string, dateTo: string, storeKey: string, sourceType: string, options: TrendRequestOptions): Promise<RevenueTrendResult> {
+  const principal = analyticsPrincipalKey();
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_ANALYTICS_CACHE_TTL_SECONDS;
   const days = eachDate(dateFrom, dateTo);
-  const bucketKey = revenueTrendBucketKey(storeKey, sourceType);
+  const bucketKey = revenueTrendBucketKey(storeKey, sourceType, options.includeCurrent);
   const bucket = await readDailyBucket<RevenueTrendPoint>(REVENUE_TREND_DAILY_NAMESPACE, bucketKey);
   const clientDays = days.flatMap((day) => {
     const cached = bucket.days[day];
@@ -799,7 +823,7 @@ async function getRevenueTrendDelta(dateFrom: string, dateTo: string, storeKey: 
     body: JSON.stringify({
       date_from: dateFrom,
       date_to: dateTo,
-      params: { store_key: storeKey, source_type: sourceType },
+      params: { store_key: storeKey, source_type: sourceType, include_current: !!options.includeCurrent },
       client_days: clientDays,
       force_refresh: !!options.forceRefresh,
     }),
@@ -839,7 +863,7 @@ async function getRevenueTrendDelta(dateFrom: string, dateTo: string, storeKey: 
       : dailyRevenueMovingAverages(points),
     points,
   };
-  if (!options.signal?.aborted) await writeDailyBucket(REVENUE_TREND_DAILY_NAMESPACE, bucketKey, bucket, ttlSeconds);
+  if (!options.signal?.aborted && analyticsPrincipalKey() === principal) await writeDailyBucket(REVENUE_TREND_DAILY_NAMESPACE, bucketKey, bucket, ttlSeconds);
   return result;
 }
 
@@ -1241,18 +1265,18 @@ export async function getRevenueTrend(dateFrom: string, dateTo: string, storeKey
   const storeKeys = normalizedStoreKeys(options.storeKeys);
   const granularity = options.granularity || 'day';
   const inflightKey = analyticsCacheKey('analytics.revenue_trend.delta', `${dateFrom}:${dateTo}:${storeKeys.join(',') || storeKey}:${sourceType}:${granularity}:${!!options.includeCurrent}:${!!options.includeStoreTrends}:${!!options.forceRefresh}`);
-  const inflight = inflightAnalyticsRequests.get(inflightKey);
+  const inflight = options.signal ? undefined : inflightAnalyticsRequests.get(inflightKey);
   if (inflight) return inflight as Promise<RevenueTrendResult>;
   const baseRequest = granularity !== 'day' || storeKeys.length || options.includeStoreTrends
     ? getRevenueTrendFallback(dateFrom, dateTo, storeKey, sourceType, options)
     : getRevenueTrendDelta(dateFrom, dateTo, storeKey, sourceType, options).catch((err) => {
-      if (options.signal?.aborted) throw err;
+      if (options.signal?.aborted || isAnalyticsAccessError(err)) throw err;
       return getRevenueTrendFallback(dateFrom, dateTo, storeKey, sourceType, options);
     });
   const request = baseRequest.finally(() => {
-      inflightAnalyticsRequests.delete(inflightKey);
+      if (!options.signal) inflightAnalyticsRequests.delete(inflightKey);
     });
-  inflightAnalyticsRequests.set(inflightKey, request);
+  if (!options.signal) inflightAnalyticsRequests.set(inflightKey, request);
   return request;
 }
 
@@ -1263,18 +1287,19 @@ export async function getMealPeriods(storeKey: string, businessDate: string, opt
   return cachedJson<MealPeriodsResult>(`${base}?${qs}`, { ...options, namespace: 'analytics.meal_periods', cacheKey: `${base}?${cacheQs}` });
 }
 
-function mealPeriodTrendCacheKey(storeKey: string, dateFrom: string, dateTo: string, storeKeys?: string[]): string {
+function mealPeriodTrendCacheKey(storeKey: string, dateFrom: string, dateTo: string, options: TrendRequestOptions): string {
   const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
-  appendStoreKeys(params, storeKeys);
+  appendStoreKeys(params, options.storeKeys);
+  params.set('include_current', String(!!options.includeCurrent));
   return `/api/v1/analytics/stores/${encodeURIComponent(storeKey)}/meal-periods/trend?${params.toString()}`;
 }
 
-function mealPeriodTrendBucketKey(storeKey: string): string {
-  return storeKey;
+function mealPeriodTrendBucketKey(storeKey: string, includeCurrent = false): string {
+  return `${storeKey}${includeCurrent ? ':include-current' : ''}`;
 }
 
-async function getMealPeriodTrendFallback(storeKey: string, dateFrom: string, dateTo: string, options: AnalyticsRequestOptions): Promise<MealPeriodTrendResult> {
-  const cacheKey = mealPeriodTrendCacheKey(storeKey, dateFrom, dateTo, options.storeKeys);
+async function getMealPeriodTrendFallback(storeKey: string, dateFrom: string, dateTo: string, options: TrendRequestOptions): Promise<MealPeriodTrendResult> {
+  const cacheKey = mealPeriodTrendCacheKey(storeKey, dateFrom, dateTo, options);
   const qs = `${cacheKey.split('?')[1]}&refresh=${!!options.forceRefresh}`;
   const base = `/api/v1/analytics/stores/${encodeURIComponent(storeKey)}/meal-periods/trend`;
   return cachedJson<MealPeriodTrendResult>(`${base}?${qs}`, {
@@ -1284,10 +1309,11 @@ async function getMealPeriodTrendFallback(storeKey: string, dateFrom: string, da
   });
 }
 
-async function getMealPeriodTrendDelta(storeKey: string, dateFrom: string, dateTo: string, options: AnalyticsRequestOptions): Promise<MealPeriodTrendResult> {
+async function getMealPeriodTrendDelta(storeKey: string, dateFrom: string, dateTo: string, options: TrendRequestOptions): Promise<MealPeriodTrendResult> {
+  const principal = analyticsPrincipalKey();
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_ANALYTICS_CACHE_TTL_SECONDS;
   const days = eachDate(dateFrom, dateTo);
-  const bucketKey = mealPeriodTrendBucketKey(storeKey);
+  const bucketKey = mealPeriodTrendBucketKey(storeKey, options.includeCurrent);
   const bucket = await readDailyBucket<MealPeriodTrendPoint>(MEAL_PERIOD_TREND_DAILY_NAMESPACE, bucketKey);
   const clientDays = days.flatMap((day) => {
     const cached = bucket.days[day];
@@ -1300,7 +1326,7 @@ async function getMealPeriodTrendDelta(storeKey: string, dateFrom: string, dateT
     body: JSON.stringify({
       date_from: dateFrom,
       date_to: dateTo,
-      params: { store_key: storeKey },
+      params: { store_key: storeKey, include_current: !!options.includeCurrent },
       client_days: clientDays,
       force_refresh: !!options.forceRefresh,
     }),
@@ -1331,26 +1357,26 @@ async function getMealPeriodTrendDelta(storeKey: string, dateFrom: string, dateT
     date_to: dateTo,
     points: days.map((day) => merged.get(day)).filter((point): point is MealPeriodTrendPoint => !!point),
   };
-  if (!options.signal?.aborted) await writeDailyBucket(MEAL_PERIOD_TREND_DAILY_NAMESPACE, bucketKey, bucket, ttlSeconds);
+  if (!options.signal?.aborted && analyticsPrincipalKey() === principal) await writeDailyBucket(MEAL_PERIOD_TREND_DAILY_NAMESPACE, bucketKey, bucket, ttlSeconds);
   return result;
 }
 
-export async function getMealPeriodTrend(storeKey: string, dateFrom: string, dateTo: string, options: AnalyticsRequestOptions = {}): Promise<MealPeriodTrendResult> {
+export async function getMealPeriodTrend(storeKey: string, dateFrom: string, dateTo: string, options: TrendRequestOptions = {}): Promise<MealPeriodTrendResult> {
   const storeKeys = normalizedStoreKeys(options.storeKeys);
-  const inflightKey = analyticsCacheKey('analytics.meal_period_trend.delta', `${storeKeys.join(',') || storeKey}:${dateFrom}:${dateTo}:${!!options.includeStoreTrends}:${!!options.forceRefresh}`);
-  const inflight = inflightAnalyticsRequests.get(inflightKey);
+  const inflightKey = analyticsCacheKey('analytics.meal_period_trend.delta', `${storeKeys.join(',') || storeKey}:${dateFrom}:${dateTo}:${!!options.includeCurrent}:${!!options.includeStoreTrends}:${!!options.forceRefresh}`);
+  const inflight = options.signal ? undefined : inflightAnalyticsRequests.get(inflightKey);
   if (inflight) return inflight as Promise<MealPeriodTrendResult>;
   const request = (storeKeys.length || options.includeStoreTrends
     ? getMealPeriodTrendFallback(storeKey, dateFrom, dateTo, options)
     : getMealPeriodTrendDelta(storeKey, dateFrom, dateTo, options))
     .catch((err) => {
-      if (options.signal?.aborted) throw err;
+      if (options.signal?.aborted || isAnalyticsAccessError(err)) throw err;
       return getMealPeriodTrendFallback(storeKey, dateFrom, dateTo, options);
     })
     .finally(() => {
-      inflightAnalyticsRequests.delete(inflightKey);
+      if (!options.signal) inflightAnalyticsRequests.delete(inflightKey);
     });
-  inflightAnalyticsRequests.set(inflightKey, request);
+  if (!options.signal) inflightAnalyticsRequests.set(inflightKey, request);
   return request;
 }
 

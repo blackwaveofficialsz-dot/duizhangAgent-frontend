@@ -99,6 +99,15 @@ export type OperationsOverview = {
   completeness: OperationsCompleteness;
   cache_meta?: AnalyticsCacheMeta | null;
   generated_at: string;
+  freshness?: {
+    mode: 'realtime' | 'historical';
+    provisional: boolean;
+    snapshot_version: string | null;
+    data_as_of: string | null;
+    generated_at: string;
+    status: 'current' | 'updating' | 'unavailable';
+    refresh_interval_seconds: number;
+  };
 };
 
 export type MealPeriodMetric = {

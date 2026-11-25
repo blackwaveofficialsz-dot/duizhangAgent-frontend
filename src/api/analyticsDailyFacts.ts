@@ -1,4 +1,5 @@
 import { apiFetch } from './client';
+import { useAuthStore } from '../store/authStore';
 import {
   applyDailyDelta,
   buildClientDays,
@@ -46,6 +47,8 @@ export function analyticsDailyFactV2Enabled(): boolean {
 }
 
 function currentTenantId(): string {
+  const tenantId = useAuthStore.getState().tenantId;
+  if (tenantId) return tenantId;
   try {
     return localStorage.getItem('auth_tenant_id') || 'anonymous';
   } catch {
@@ -54,6 +57,8 @@ function currentTenantId(): string {
 }
 
 function currentUserId(): string {
+  const userId = useAuthStore.getState().userId;
+  if (userId) return userId;
   try {
     return localStorage.getItem('auth_user_id') || 'anonymous';
   } catch {
@@ -124,7 +129,7 @@ async function parseDeltaResponse<T>(response: Response): Promise<DailyFactDelta
     } catch (err) {
       if (err instanceof DailyFactUnsupportedError) throw err;
     }
-    throw new Error(detail);
+    throw Object.assign(new Error(detail), { status: response.status });
   }
   const body = await response.json();
   if (body?.code === 'unsupported_schema') throw new DailyFactUnsupportedError();

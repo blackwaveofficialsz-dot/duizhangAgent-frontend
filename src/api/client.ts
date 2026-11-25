@@ -47,7 +47,7 @@ export async function apiFetch(url: string, options: FetchOptions = {}): Promise
         if (res.status !== 401) return res;
       }
       await useAuthStore.getState().logout({ remote: false });
-      throw new Error('登录已过期，请重新登录');
+      throw Object.assign(new Error('登录已过期，请重新登录'), { status: 401 });
     }
 
     return res;

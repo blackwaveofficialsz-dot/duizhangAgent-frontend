@@ -14,6 +14,7 @@ vi.mock('./analyticsDailyCache', () => cache);
 
 import { DailyFactUnsupportedError, fetchDailyFacts, getOrderDailyFacts, stableParamsHash } from './analyticsDailyFacts';
 import type { DailyFactRecord } from './analyticsDailyTypes';
+import { useAuthStore } from '../store/authStore';
 
 function ok(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -36,6 +37,21 @@ function record(date: string, version: string): DailyFactRecord<{ value: number 
 }
 
 describe('analyticsDailyFacts', () => {
+  it('takes the authenticated principal from the session instead of stale legacy storage', async () => {
+    useAuthStore.setState({ tenantId: 'active-tenant', userId: 'active-user' });
+    apiFetch.mockResolvedValue(ok({
+      namespace: 'orders', schema_version: 'orders-daily-fact-v4', date_from: '2026-08-01', date_to: '2026-08-01',
+      params_hash: 'hash-orders', access_scope_hash: 'scope-current', reset_required: false,
+      unchanged_days: ['2026-08-01'], changed_days: [], deleted_days: [],
+      cache_meta: { status: 'hit', server_checked_days: 1, returned_days: 0, deleted_days: 0 },
+    }));
+    try {
+      await getOrderDailyFacts('2026-08-01', '2026-08-01');
+      expect(cache.readDailyManifest).toHaveBeenLastCalledWith(expect.objectContaining({ tenantId: 'active-tenant', userId: 'active-user' }));
+    } finally {
+      useAuthStore.setState({ tenantId: null, userId: '' });
+    }
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.stubEnv('VITE_ANALYTICS_DAILY_FACT_V2', 'true');

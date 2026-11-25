@@ -1,5 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { addMoney, sumMoney } from "../../utils/money";
+import { formatBeijingTime } from "../../utils/time";
+import { usePolling } from "../../hooks/usePolling";
 import {
   Alert as AntAlert,
   Button as AntButton,
@@ -104,6 +106,29 @@ const compactYuan = (value: number | null | undefined) => {
   return Math.abs(n) >= 10000 ? `¥${(n / 10000).toFixed(1)}万` : yuan(n);
 };
 const searchableSelectProps = { showSearch: true, optionFilterProp: "label" };
+
+function isPermissionError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "status" in error
+    && (error.status === 401 || error.status === 403);
+}
+
+function followAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  return () => signal?.removeEventListener("abort", abort);
+}
+
+function dailyFactVersions(records: DailyFactRecord<unknown>[]): string {
+  return records.map(record => `${record.accessScopeHash}:${record.date}:${record.version}`).join("|");
+}
+
+type RevenueSourceData = Pick<RevenueTrendResult, "points" | "moving_averages" | "store_trends">;
+
+export function revenueSourceData(current: RevenueSourceData | null, previous: RevenueSourceData | undefined, preservePrevious: boolean): Required<RevenueSourceData> {
+  const source = current ?? (preservePrevious ? previous : undefined);
+  return { points: source?.points || [], moving_averages: source?.moving_averages || [], store_trends: source?.store_trends || {} };
+}
 
 function beijingTodayYmd(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -1577,8 +1602,13 @@ function MealPeriodTurnoverCards({ rows }: { rows: MealPeriodTurnoverRow[] }) {
 }
 
 export function DashboardPage({ show }: { show: (m: string) => void }) {
+  const relativeRangeRef = useRef<"default" | "current" | null>("default");
+  const rangeDayRef = useRef(beijingTodayYmd());
+  const accessRevokedRef = useRef(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [trendRange, setTrendRange] = useState(() =>
-    defaultTrendRange("day", beijingTodayYmd()),
+    defaultTrendRange("day", beijingTodayYmd(), true),
   );
   const { dateFrom, dateTo, includeCurrent } = trendRange;
   const [granularity, setGranularity] = useState<TrendGranularity>("day");
@@ -1738,10 +1768,32 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const mealFactAbortRef = useRef<AbortController | null>(null);
   const orderFactRefreshConsumedRef = useRef(0);
   const mealFactRefreshConsumedRef = useRef(0);
+  const orderFactVersionsRef = useRef("");
+  const mealFactVersionsRef = useRef("");
   const detailLoadSeqRef = useRef(0);
   const detailLoadAbortRef = useRef<AbortController | null>(null);
 
-  const loadComparison = () => {
+  const denyAccess = () => {
+    accessRevokedRef.current = true;
+    loadSeqRef.current++;
+    detailLoadSeqRef.current++;
+    loadAbortRef.current?.abort();
+    detailLoadAbortRef.current?.abort();
+    orderFactAbortRef.current?.abort();
+    mealFactAbortRef.current?.abort();
+    setComparisonOverview(null);
+    setRevenueDisplay(null);
+    setOrderFacts([]);
+    setMealFacts([]);
+    setMealRows([]);
+    setMealTrendPoints([]);
+    setMealStoreTrends({});
+    setMealTurnover(null);
+    setPermissionDenied(true);
+  };
+
+  const loadComparison = (silent = false, signal?: AbortSignal) => {
+    if (accessRevokedRef.current) return;
     const seq = detailLoadSeqRef.current + 1;
     detailLoadSeqRef.current = seq;
     detailLoadAbortRef.current?.abort('dashboard detail load');
@@ -1753,10 +1805,13 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       return;
     }
     const controller = new AbortController();
+    const releaseAbort = followAbort(signal, controller);
     detailLoadAbortRef.current = controller;
-    setDetailLoading(true);
-    setComparisonOverview(null);
-    fetchOperationsOverview({
+    if (!silent) {
+      setDetailLoading(true);
+      setComparisonOverview(null);
+    }
+    return fetchOperationsOverview({
       filters: {
         scopeKeys,
         storeKeys: scopeKeys.includes("ALL") ? [] : shopKeys,
@@ -1765,22 +1820,31 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         dateFrom: selectedDetailPeriod.dateFrom,
         dateTo: selectedDetailPeriod.dateTo,
         compare: comparisonMode,
+        includeCurrent,
       },
       signal: controller.signal,
+      refresh: false,
     })
       .then(overview => {
-        if (seq === detailLoadSeqRef.current) setComparisonOverview(overview);
+        if (seq !== detailLoadSeqRef.current || controller.signal.aborted) return false;
+        setComparisonOverview(overview);
+        return true;
       })
       .catch(error => {
+        if (controller.signal.aborted || seq !== detailLoadSeqRef.current) return false;
+        if (isPermissionError(error)) { denyAccess(); return false; }
         if (
           seq === detailLoadSeqRef.current
           && !(error instanceof DOMException && error.name === "AbortError")
         ) {
-          setComparisonOverview(null);
+          if (!silent) setComparisonOverview(null);
         }
+        return false;
       })
       .finally(() => {
+        releaseAbort();
         if (seq === detailLoadSeqRef.current) setDetailLoading(false);
+        if (detailLoadAbortRef.current === controller) detailLoadAbortRef.current = null;
       });
   };
 
@@ -1788,7 +1852,10 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     revalidate = false,
     includeRevenue = orderFactMode !== "ready",
     includeMeal = mealFactMode !== "ready",
+    signal?: AbortSignal,
+    silent = false,
   ) => {
+    if (accessRevokedRef.current) return;
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     loadAbortRef.current?.abort('ssd load');
@@ -1827,11 +1894,13 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       return;
     }
     const controller = new AbortController();
+    const releaseAbort = followAbort(signal, controller);
     loadAbortRef.current = controller;
-    setLoading(true);
+    if (!silent) setLoading(true);
     const selectedStoreOptions = {
       signal: controller.signal,
-      revalidate,
+      revalidate: revalidate || (dateFrom <= beijingTodayYmd() && dateTo >= beijingTodayYmd()),
+      forceRefresh: false,
       storeKeys: scopeKeys.includes("ALL") ? undefined : shopKeys,
     };
     const revenueOptions = {
@@ -1840,7 +1909,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       granularity,
       includeCurrent,
     };
-    const trendRequests = trendMode === "source_compare"
+    const trendRequests = !includeRevenue ? [] : trendMode === "source_compare"
       ? [
           getRevenueTrend(dateFrom, dateTo, "ALL", "shop", revenueOptions),
           getRevenueTrend(dateFrom, dateTo, "ALL", "takeout", revenueOptions),
@@ -1852,12 +1921,13 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     const mealRequest = includeMeal
       ? getMealPeriods("ALL", dateTo, {
           signal: controller.signal,
-          revalidate,
+          revalidate: selectedStoreOptions.revalidate,
         })
       : Promise.resolve(null);
     const mealTrendRequest = includeMeal
       ? getMealPeriodTrend("ALL", dateFrom, dateTo, {
           ...selectedStoreOptions,
+          includeCurrent,
           includeStoreTrends: shopKeys.length > 0,
         })
       : Promise.resolve(null);
@@ -1869,7 +1939,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
           selectedStoreOptions,
         )
       : Promise.resolve(null);
-    Promise.allSettled([
+    return Promise.allSettled([
       trendRequest,
       mealRequest,
       mealTrendRequest,
@@ -1877,6 +1947,16 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     ])
       .then(([trendGroupResult, mealResult, mealTrendResult, turnoverResult]) => {
         if (seq !== loadSeqRef.current || controller.signal.aborted) return;
+        const results = [
+          ...(includeRevenue
+            ? (trendGroupResult.status === "fulfilled" ? trendGroupResult.value : [trendGroupResult])
+            : []),
+          ...(includeMeal ? [mealResult, mealTrendResult, turnoverResult] : []),
+        ];
+        if (results.some(result => result.status === "rejected" && isPermissionError(result.reason))) {
+          denyAccess();
+          return false;
+        }
         const displayBase = {
           trendMode,
           granularity,
@@ -1897,17 +1977,24 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
           const shopTrend = trendResults[0]?.status === "fulfilled" ? trendResults[0].value : null;
           const takeoutTrend = trendResults[1]?.status === "fulfilled" ? trendResults[1].value : null;
           if (shopTrend || takeoutTrend) {
-            setRevenueDisplay({
-              ...displayBase,
-              trendPoints: [],
-              movingAverages: [],
-              storeTrends: {},
-              shopTrendPoints: shopTrend?.points || [],
-              shopMovingAverages: shopTrend?.moving_averages || [],
-              shopStoreTrends: shopTrend?.store_trends || {},
-              takeoutTrendPoints: takeoutTrend?.points || [],
-              takeoutMovingAverages: takeoutTrend?.moving_averages || [],
-              takeoutStoreTrends: takeoutTrend?.store_trends || {},
+            setRevenueDisplay(previous => {
+              const preservePrevious = silent && previous?.trendMode === trendMode
+                && previous.granularity === granularity && previous.includeCurrent === includeCurrent
+                && previous.dateFrom === dateFrom && previous.dateTo === dateTo
+                && previous.scopeKeys.join(",") === scopeKeys.join(",")
+                && previous.shopKeys.join(",") === shopKeys.join(",");
+              const shop = revenueSourceData(shopTrend, previous ? { points: previous.shopTrendPoints, moving_averages: previous.shopMovingAverages, store_trends: previous.shopStoreTrends } : undefined, preservePrevious);
+              const takeout = revenueSourceData(takeoutTrend, previous ? { points: previous.takeoutTrendPoints, moving_averages: previous.takeoutMovingAverages, store_trends: previous.takeoutStoreTrends } : undefined, preservePrevious);
+              return {
+                ...displayBase,
+                trendPoints: [], movingAverages: [], storeTrends: {},
+                shopTrendPoints: shop.points,
+                shopMovingAverages: shop.moving_averages,
+                shopStoreTrends: shop.store_trends,
+                takeoutTrendPoints: takeout.points,
+                takeoutMovingAverages: takeout.moving_averages,
+                takeoutStoreTrends: takeout.store_trends,
+              };
             });
           }
         } else if (trendResults[0]?.status === "fulfilled") {
@@ -1945,18 +2032,18 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         }
         if (includeMeal && turnoverResult.status === "fulfilled") setMealTurnover(turnoverResult.value);
 
-        [
-          ...(includeRevenue
-            ? (trendGroupResult.status === "fulfilled" ? trendGroupResult.value : [trendGroupResult])
-            : []),
-          ...(includeMeal ? [mealResult, mealTrendResult, turnoverResult] : []),
-        ].forEach(result => {
+        results.forEach(result => {
           if (result.status !== "rejected") return;
-          console.error(result.reason);
-          show(result.reason instanceof Error ? result.reason.message : String(result.reason));
+          if (!silent) {
+            console.error(result.reason);
+            show(result.reason instanceof Error ? result.reason.message : String(result.reason));
+          }
         });
+        return results.every(result => result.status === "fulfilled");
       })
       .finally(() => {
+        releaseAbort();
+        if (loadAbortRef.current === controller) loadAbortRef.current = null;
         if (seq === loadSeqRef.current) {
           setLoading(false);
         }
@@ -1982,19 +2069,27 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     })
       .then((records: DailyFactRecord<OrderDailyFact>[]) => {
         if (controller.signal.aborted) return;
+        orderFactVersionsRef.current = dailyFactVersions(records);
         setOrderFacts(records.map(dashboardOrderFactFromRecord));
         setOrderFactMode("ready");
       })
       .catch((error) => {
         if (controller.signal.aborted) return;
+        if (isPermissionError(error)) { denyAccess(); return; }
         setOrderFacts([]);
         setOrderFactMode("fallback");
         if (forceRefresh) {
           console.error(error);
           show(error instanceof Error ? error.message : String(error));
         }
+      })
+      .finally(() => {
+        if (orderFactAbortRef.current === controller) orderFactAbortRef.current = null;
       });
-    return () => controller.abort("order daily facts cleanup");
+    return () => {
+      controller.abort("order daily facts cleanup");
+      if (orderFactAbortRef.current === controller) orderFactAbortRef.current = null;
+    };
     /* eslint-disable-next-line */
   }, [dateTo, historyDateFrom, orderFactRefreshSeq]);
 
@@ -2054,19 +2149,27 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     })
       .then((records: DailyFactRecord<MealDailyFact>[]) => {
         if (controller.signal.aborted) return;
+        mealFactVersionsRef.current = dailyFactVersions(records);
         setMealFacts(records.map(dashboardMealFactFromRecord));
         setMealFactMode("ready");
       })
       .catch((error) => {
         if (controller.signal.aborted) return;
+        if (isPermissionError(error)) { denyAccess(); return; }
         setMealFacts([]);
         setMealFactMode("fallback");
         if (forceRefresh) {
           console.error(error);
           show(error instanceof Error ? error.message : String(error));
         }
+      })
+      .finally(() => {
+        if (mealFactAbortRef.current === controller) mealFactAbortRef.current = null;
       });
-    return () => controller.abort("meal daily facts cleanup");
+    return () => {
+      controller.abort("meal daily facts cleanup");
+      if (mealFactAbortRef.current === controller) mealFactAbortRef.current = null;
+    };
     /* eslint-disable-next-line */
   }, [dateTo, historyDateFrom, mealFactRefreshSeq]);
 
@@ -2131,7 +2234,57 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       detailLoadAbortRef.current?.abort('dashboard detail effect cleanup');
     };
     /* eslint-disable-next-line */
-  }, [selectedDetailPeriod?.dateFrom, selectedDetailPeriod?.dateTo, granularity, comparisonMode, scopeKeys.join(','), shopKeys.join(',')]);
+  }, [selectedDetailPeriod?.dateFrom, selectedDetailPeriod?.dateTo, granularity, includeCurrent, comparisonMode, scopeKeys.join(','), shopKeys.join(',')]);
+  const today = beijingTodayYmd();
+  const realtimeRange = (granularity === "day" || includeCurrent)
+    && (relativeRangeRef.current !== null || (dateFrom <= today && dateTo >= today));
+  usePolling(async signal => {
+    const nextToday = beijingTodayYmd();
+    if (relativeRangeRef.current && rangeDayRef.current !== nextToday) {
+      rangeDayRef.current = nextToday;
+      setTrendRange(current => relativeRangeRef.current === "default"
+        ? defaultTrendRange(granularity, nextToday, true)
+        : { ...current, dateTo: nextToday });
+      return;
+    }
+    if (loading || detailLoading || orderFactMode === "loading" || mealFactMode === "loading") return;
+    const refreshOrderFacts = async () => {
+      if (orderFactMode !== "ready") return true;
+      const records = await getOrderDailyFacts<OrderDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
+      if (signal.aborted || accessRevokedRef.current) return false;
+      const versions = dailyFactVersions(records);
+      if (versions !== orderFactVersionsRef.current) {
+        orderFactVersionsRef.current = versions;
+        setOrderFacts(records.map(dashboardOrderFactFromRecord));
+      }
+      return true;
+    };
+    const refreshMealFacts = async () => {
+      if (mealFactMode !== "ready") return true;
+      const records = await getMealDailyFacts<MealDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
+      if (signal.aborted || accessRevokedRef.current) return false;
+      const versions = dailyFactVersions(records);
+      if (versions !== mealFactVersionsRef.current) {
+        mealFactVersionsRef.current = versions;
+        setMealFacts(records.map(dashboardMealFactFromRecord));
+      }
+      return true;
+    };
+    const results = await Promise.allSettled([
+      refreshOrderFacts(), refreshMealFacts(),
+      orderFactMode !== "ready" || mealFactMode !== "ready"
+        ? load(true, orderFactMode !== "ready", mealFactMode !== "ready", signal, true)
+        : Promise.resolve(true),
+      loadComparison(true, signal),
+    ]);
+    if (signal.aborted || accessRevokedRef.current) return;
+    if (results.some(result => result.status === "rejected" && isPermissionError(result.reason))) {
+      denyAccess();
+      return;
+    }
+    setRefreshFailed(results.some(result => result.status === "rejected" || result.value === false));
+  }, !permissionDenied && realtimeRange && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 300000 : null,
+  [dateFrom, dateTo, granularity, includeCurrent, trendMode, comparisonMode, selectedDetailPeriod?.key, scopeKeys.join(','), shopKeys.join(',')]);
   useEffect(() => {
     const point = activeMealTrendPoints.find(item => item.date === selectedMealDate);
     if (point) setMealRows(MEAL_PERIOD_SERIES.map(([key]) => point[key]));
@@ -2148,15 +2301,23 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     }
   }, [fullscreenChart]);
   const handleGranularityChange = (next: TrendGranularity) => {
+    relativeRangeRef.current = "default";
+    rangeDayRef.current = beijingTodayYmd();
     setGranularity(next);
-    setTrendRange(defaultTrendRange(next, beijingTodayYmd()));
+    setTrendRange(defaultTrendRange(next, beijingTodayYmd(), true));
   };
   const handleRangeChange = (nextFrom: string, nextTo: string) => {
+    relativeRangeRef.current = null;
     setTrendRange(current => ({
       ...current,
       dateFrom: nextFrom,
       dateTo: nextTo,
     }));
+  };
+  const handleIncludeCurrentChange = (value: boolean) => {
+    relativeRangeRef.current = value ? "current" : null;
+    rangeDayRef.current = beijingTodayYmd();
+    setTrendRange(current => ({ ...current, includeCurrent: value }));
   };
   const refresh = () => {
     if (orderFactMode === "ready") {
@@ -2238,15 +2399,14 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       />
       <div className="min-w-[20rem] flex-1">
         <TrendPeriodControls
+          allowToday
           granularity={granularity}
           dateFrom={dateFrom}
           dateTo={dateTo}
           includeCurrent={includeCurrent}
           onGranularityChange={handleGranularityChange}
           onRangeChange={handleRangeChange}
-          onIncludeCurrentChange={value =>
-            setTrendRange(current => ({ ...current, includeCurrent: value }))
-          }
+          onIncludeCurrentChange={handleIncludeCurrentChange}
         />
       </div>
       <AntButton
@@ -2284,15 +2444,14 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         mobile
       />
       <TrendPeriodControls
+        allowToday
         granularity={granularity}
         dateFrom={dateFrom}
         dateTo={dateTo}
         includeCurrent={includeCurrent}
         onGranularityChange={handleGranularityChange}
         onRangeChange={handleRangeChange}
-        onIncludeCurrentChange={value =>
-          setTrendRange(current => ({ ...current, includeCurrent: value }))
-        }
+        onIncludeCurrentChange={handleIncludeCurrentChange}
         fullscreen={fullscreen}
       />
       <div className={fullscreen ? "flex justify-end" : "grid grid-cols-1"}>
@@ -2309,8 +2468,15 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     </div>
   );
 
+  if (permissionDenied) return <AntAlert type="error" title="无权访问经营数据" />;
+  const freshness = comparisonOverview?.freshness;
   return (
     <div className="space-y-4">
+      {realtimeRange ? <div role="status" className="text-xs text-slate-500">
+        {freshness?.mode === "realtime" ? "实时订单（持续更新）" : "含今日订单"} · 每5分钟自动更新
+        {freshness?.data_as_of ? ` · 数据截至 ${formatBeijingTime(freshness.data_as_of, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}
+        {refreshFailed || freshness?.status === "unavailable" ? " · 更新失败，保留上次数据" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
+      </div> : null}
       <div className="rounded-lg border border-slate-200 bg-white p-4 md:p-5">
         <div className="md:hidden">
           <div className="mb-2 flex items-center justify-between gap-2">

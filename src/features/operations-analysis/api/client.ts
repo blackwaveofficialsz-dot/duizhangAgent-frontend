@@ -85,7 +85,7 @@ async function requestJson<T>(
     } catch {
       // Keep the status-based message when the response has no JSON body.
     }
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return response.json() as Promise<T>;
 }

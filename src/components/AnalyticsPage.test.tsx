@@ -569,6 +569,22 @@ describe('AnalyticsPage', () => {
     expect(screen.getAllByText('较上期 +25.0%').length).toBeGreaterThan(0);
   });
 
+  it('switching teams discards the previous dashboard and cancels its pending request', async () => {
+    useAuthStore.setState({ userId: 'scope-user', tenantId: 'tenant-a', activeWorkspaceId: 'workspace-a' });
+    render(<AnalyticsPage />);
+    fireEvent.click(screen.getByText('经营看板'));
+    const chart = await screen.findByRole('img', { name: '净实收趋势主图' });
+    const pending = deferred<unknown>();
+    operationsApi.fetchOperationsOverview.mockReturnValueOnce(pending.promise);
+    const buttons = screen.getAllByRole('button', { name: '刷新' });
+    fireEvent.click(buttons[buttons.length - 1]);
+    const signal = operationsApi.fetchOperationsOverview.mock.calls.slice(-1)[0][0].signal as AbortSignal;
+    act(() => useAuthStore.setState({ tenantId: 'tenant-b', activeWorkspaceId: 'workspace-b' }));
+    expect(signal.aborted).toBe(true);
+    await waitFor(() => expect(screen.getByRole('img', { name: '净实收趋势主图' })).not.toBe(chart));
+    await act(async () => pending.resolve({}));
+  });
+
   it('订单统计视图加载并展示营业额+净实收双口径', async () => {
     render(<AnalyticsPage />);
     fireEvent.click(screen.getByText('订单统计'));

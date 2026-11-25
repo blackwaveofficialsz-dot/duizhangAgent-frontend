@@ -21,6 +21,7 @@ import {
   refreshTradeArea,
 } from './analytics';
 import type { LaborTrendPoint, ProductTrendPoint, ProductsResult, RevenueTrendPoint } from './analytics';
+import { useAuthStore } from '../store/authStore';
 
 function ok(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -308,6 +309,119 @@ describe('analytics api', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    useAuthStore.setState({ tenantId: null, userId: '', activeWorkspaceId: '' });
+  });
+
+  it('isolates caches by the active authenticated tenant and user without legacy localStorage keys', async () => {
+    apiFetch.mockImplementation(async () => ok({ marker: useAuthStore.getState().tenantId }));
+    useAuthStore.setState({ tenantId: 'tenant-a', userId: 'user-a', activeWorkspaceId: 'workspace-a' });
+    const first = await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12');
+    useAuthStore.setState({ tenantId: 'tenant-b', activeWorkspaceId: 'workspace-b' });
+    const second = await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12');
+    expect(first).toMatchObject({ marker: 'tenant-a' });
+    expect(second).toMatchObject({ marker: 'tenant-b' });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    useAuthStore.setState({ userId: 'user-b' });
+    await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12');
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not write a late old-tenant response into the newly selected tenant cache', async () => {
+    let resolveOld!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(() => new Promise<Response>(resolve => { resolveOld = resolve; }))
+      .mockResolvedValue(ok({ marker: 'tenant-b' }));
+    useAuthStore.setState({ tenantId: 'tenant-a', userId: 'user-a', activeWorkspaceId: 'workspace-a' });
+    const old = getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12');
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    useAuthStore.setState({ tenantId: 'tenant-b', activeWorkspaceId: 'workspace-b' });
+    await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12');
+    resolveOld(ok({ marker: 'tenant-a' }));
+    await old;
+    expect(await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12')).toMatchObject({ marker: 'tenant-b' });
+  });
+
+  it('keeps server reads available when legacy storage cannot be read', async () => {
+    useAuthStore.setState({ tenantId: 'tenant-a', userId: '', activeWorkspaceId: 'workspace-a' });
+    apiFetch.mockResolvedValue(ok({ marker: 'network' }));
+    const original = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new DOMException('Denied', 'SecurityError'); });
+    try {
+      expect(await getMealPeriodTurnover('ALL', '2026-08-12', '2026-08-12')).toMatchObject({ marker: 'network' });
+    } finally { original.mockRestore(); }
+  });
+
+  it.each([401, 403])('rejects a revenue delta denial (%s) instead of restoring a cached GET result', async status => {
+    apiFetch.mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(ok({ points: [trendPoint('2026-06-01', 100)] }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'denied' }), { status }));
+    expect((await getRevenueTrend('2026-06-01', '2026-06-01')).points[0].net_income).toBe(100);
+
+    await expect(getRevenueTrend('2026-06-01', '2026-06-01')).rejects.toMatchObject({ status });
+
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    expect(apiFetch.mock.calls[2][0]).toBe('/api/v1/analytics/trends/revenue/delta');
+  });
+
+  it.each([401, 403])('rejects a meal delta denial (%s) instead of restoring a cached GET result', async status => {
+    apiFetch.mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(ok({ points: [mealPeriodTrendPoint('2026-06-01', 100)] }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'denied' }), { status }));
+    expect((await getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01')).points[0].breakfast.net_income).toBe(100);
+
+    await expect(getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01')).rejects.toMatchObject({ status });
+
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    expect(apiFetch.mock.calls[2][0]).toContain('/meal-periods/trend/delta');
+  });
+
+  it.each(['revenue', 'meal', 'turnover'])('starts a new %s read when reopening before an aborted request settles', async kind => {
+    let rejectOld!: (error: Error) => void;
+    apiFetch.mockImplementationOnce(() => new Promise<Response>((_resolve, reject) => { rejectOld = reject; }));
+    if (kind !== 'turnover') apiFetch.mockResolvedValueOnce(new Response('', { status: 404 }));
+    apiFetch.mockResolvedValue(ok({ marker: 'fresh', points: [] }));
+    const read = (signal: AbortSignal) => kind === 'revenue'
+      ? getRevenueTrend('2026-06-01', '2026-06-01', 'ALL', 'all', { signal })
+      : kind === 'meal'
+        ? getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01', { signal })
+        : getMealPeriodTurnover('ALL', '2026-06-01', '2026-06-01', { signal });
+    const oldController = new AbortController();
+    const old = read(oldController.signal).catch(error => error);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    oldController.abort();
+    const reopened = read(new AbortController().signal);
+    rejectOld(new DOMException('Aborted', 'AbortError'));
+
+    await expect(reopened).resolves.toMatchObject({ marker: 'fresh' });
+    expect((await old).name).toBe('AbortError');
+  });
+
+  it.each(['revenue', 'meal'])('sends the include-current flag and isolates %s daily versions by that flag', async kind => {
+    apiFetch.mockImplementation(async (_path, init) => {
+      const request = JSON.parse(init.body);
+      return ok({ changed_days: [{ date: '2026-06-01', version: request.params.include_current ? 'live-v1' : 'history-v1',
+        payload: kind === 'meal' ? mealPeriodTrendPoint('2026-06-01') : trendPoint('2026-06-01') }], unchanged_days: [] });
+    });
+    const read = (includeCurrent: boolean) => kind === 'meal'
+      ? getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01', { includeCurrent })
+      : getRevenueTrend('2026-06-01', '2026-06-01', 'ALL', 'all', { includeCurrent });
+    await read(false);
+    await read(true);
+    await read(true);
+    const requests = apiFetch.mock.calls.map(call => JSON.parse(call[1].body));
+    expect(requests.map(request => request.params.include_current)).toEqual([false, true, true]);
+    expect(requests[1].client_days).toEqual([]);
+    expect(requests[2].client_days).toEqual([{ date: '2026-06-01', version: 'live-v1' }]);
+  });
+
+  it('includes the current day in meal GET fallback and keeps its cache separate from historical results', async () => {
+    apiFetch.mockImplementation(async path => {
+      const url = new URL(path, 'https://example.test');
+      return ok({ marker: url.searchParams.get('include_current'), points: [] });
+    });
+    const historical = await getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01', { storeKeys: ['101'], includeCurrent: false });
+    const live = await getMealPeriodTrend('ALL', '2026-06-01', '2026-06-01', { storeKeys: ['101'], includeCurrent: true });
+    expect(historical).toMatchObject({ marker: 'false' });
+    expect(live).toMatchObject({ marker: 'true' });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
   it('preserves order refresh metadata from backend', async () => {
@@ -579,7 +693,7 @@ describe('analytics api', () => {
 
     expect(apiFetch.mock.calls.map(call => call[0])).toEqual([
       '/api/v1/analytics/trends/revenue?date_from=2026-06-01&date_to=2026-06-02&store_key=ALL&source_type=all&granularity=day&include_current=false&refresh=false',
-      '/api/v1/analytics/stores/ALL/meal-periods/trend?date_from=2026-06-01&date_to=2026-06-02&refresh=false',
+      '/api/v1/analytics/stores/ALL/meal-periods/trend?date_from=2026-06-01&date_to=2026-06-02&include_current=false&refresh=false',
       '/api/v1/analytics/products/trend?product_key=sku-1&date_from=2026-06-01&date_to=2026-06-02&dim_key=ALL&dim_type=all&granularity=day&include_current=false&refresh=false',
     ]);
   });

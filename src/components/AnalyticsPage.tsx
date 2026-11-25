@@ -23,6 +23,7 @@ const SUB_TABS: { key: SubTab; label: string }[] = [
 
 export function AnalyticsPage() {
   const canManage = useAuthStore(s => s.role === 'admin');
+  const dashboardScope = useAuthStore(s => JSON.stringify([s.userId, s.tenantId, s.activeWorkspaceId]));
   const [tab, setTab] = useState<SubTab>('orders');
   const [notice, setNotice] = useState<string>('');
   const show = (m: string) => { setNotice(m); window.setTimeout(() => setNotice(''), 4000); };
@@ -45,7 +46,7 @@ export function AnalyticsPage() {
         </div>
         {tab === 'dashboard' && (
           <Suspense fallback={<div className="rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-400">经营看板加载中…</div>}>
-            <DashboardPage show={show} />
+            <DashboardPage key={dashboardScope} show={show} />
           </Suspense>
         )}
         {tab === 'orders' && <OrdersSection show={show} canManage={canManage} />}

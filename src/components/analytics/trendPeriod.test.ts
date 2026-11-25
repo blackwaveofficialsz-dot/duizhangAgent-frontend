@@ -8,27 +8,27 @@ import {
 } from './trendPeriod';
 
 describe('trend period', () => {
-  it('returns five completed weeks by default', () => {
-    expect(defaultTrendRange('week', '2026-07-20')).toEqual({
-      dateFrom: '2026-06-15',
-      dateTo: '2026-07-19',
-      includeCurrent: false,
+  it('includes today in the five default weeks', () => {
+    expect(defaultTrendRange('week', '2026-07-20', true)).toEqual({
+      dateFrom: '2026-06-22',
+      dateTo: '2026-07-20',
+      includeCurrent: true,
     });
   });
 
-  it('returns five completed months by default', () => {
-    expect(defaultTrendRange('month', '2026-07-20')).toEqual({
-      dateFrom: '2026-02-01',
-      dateTo: '2026-06-30',
-      includeCurrent: false,
+  it('includes today in the five default months', () => {
+    expect(defaultTrendRange('month', '2026-07-20', true)).toEqual({
+      dateFrom: '2026-03-01',
+      dateTo: '2026-07-20',
+      includeCurrent: true,
     });
   });
 
-  it('returns ten completed days by default', () => {
-    expect(defaultTrendRange('day', '2026-07-20')).toEqual({
-      dateFrom: '2026-07-10',
-      dateTo: '2026-07-19',
-      includeCurrent: false,
+  it('includes today in the ten default days', () => {
+    expect(defaultTrendRange('day', '2026-07-20', true)).toEqual({
+      dateFrom: '2026-07-11',
+      dateTo: '2026-07-20',
+      includeCurrent: true,
     });
   });
 
@@ -38,20 +38,22 @@ describe('trend period', () => {
     expect(trendHistoryStart('month', '2026-08-01')).toBe('2025-09-01');
   });
 
-  it('adds the current period only through yesterday', () => {
+  it('adds the current period through today', () => {
     expect(toggleCurrentPeriod(
       'week',
       { dateFrom: '2026-06-15', dateTo: '2026-07-19' },
       true,
       '2026-07-20',
-    )).toEqual({ dateFrom: '2026-06-15', dateTo: '2026-07-19', includeCurrent: true });
+      true,
+    )).toEqual({ dateFrom: '2026-06-15', dateTo: '2026-07-20', includeCurrent: true });
 
     expect(toggleCurrentPeriod(
       'week',
       { dateFrom: '2026-06-15', dateTo: '2026-07-19' },
       true,
       '2026-07-22',
-    )).toEqual({ dateFrom: '2026-06-15', dateTo: '2026-07-21', includeCurrent: true });
+      true,
+    )).toEqual({ dateFrom: '2026-06-15', dateTo: '2026-07-22', includeCurrent: true });
   });
 
   it('normalizes ISO weeks and calendar months without future dates', () => {
@@ -59,18 +61,18 @@ describe('trend period', () => {
       .toEqual(['2026-07-13', '2026-07-19']);
     expect(normalizeTrendRange('month', '2026-05-12', '2026-06-03', false, '2026-07-20'))
       .toEqual(['2026-05-01', '2026-06-30']);
-    expect(normalizeTrendRange('month', '2026-06-12', '2026-07-20', true, '2026-07-20'))
-      .toEqual(['2026-06-01', '2026-07-19']);
+    expect(normalizeTrendRange('month', '2026-06-12', '2026-07-20', true, '2026-07-20', true))
+      .toEqual(['2026-06-01', '2026-07-20']);
   });
 
-  it('falls back to the previous complete week when Monday has no current-week data', () => {
-    expect(normalizeTrendRange('week', '2026-07-20', '2026-07-20', true, '2026-07-20'))
-      .toEqual(['2026-07-13', '2026-07-19']);
+  it('allows the current Monday before a complete day exists', () => {
+    expect(normalizeTrendRange('week', '2026-07-20', '2026-07-20', true, '2026-07-20', true))
+      .toEqual(['2026-07-20', '2026-07-20']);
   });
 
-  it('falls back to the previous complete month on the first day of a month', () => {
-    expect(normalizeTrendRange('month', '2026-08-01', '2026-08-01', true, '2026-08-01'))
-      .toEqual(['2026-07-01', '2026-07-31']);
+  it('allows the first day of the current month', () => {
+    expect(normalizeTrendRange('month', '2026-08-01', '2026-08-01', true, '2026-08-01', true))
+      .toEqual(['2026-08-01', '2026-08-01']);
   });
 
   it('builds selectable daily detail periods and keeps the latest last', () => {

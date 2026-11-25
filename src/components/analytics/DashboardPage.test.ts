@@ -86,6 +86,7 @@ import {
   mealTrendMetricValue,
   mergeTrendPoints,
   preserveLegendSelection,
+  revenueSourceData,
   rememberLegendSelection,
   sameMealPeriodTrendChartProps,
   sameTrendMainChartProps,
@@ -106,6 +107,7 @@ const scopeTreeResponse = {
   store_count: 2,
   source: 'test',
 };
+const defaultOverviewRequest = operationsApi.fetchOperationsOverview.getMockImplementation()!;
 
 async function chooseScope(label: string) {
   await waitFor(() => expect(analyticsApi.listStoreScopeTree).toHaveBeenCalled());
@@ -129,6 +131,7 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  operationsApi.fetchOperationsOverview.mockReset().mockImplementation(defaultOverviewRequest);
   dailyFactsApi.getOrderDailyFacts.mockRejectedValue(new Error('unsupported'));
   dailyFactsApi.getMealDailyFacts.mockRejectedValue(new Error('unsupported'));
   analyticsApi.getRevenueTrend.mockResolvedValue({ points: [] });
@@ -428,13 +431,20 @@ describe('mealPeriodTimeRange', () => {
 
 describe('trend point status', () => {
   it('explains current and incomplete periods in the tooltip', () => {
-    expect(trendPointStatusText({ in_progress: true, missing: false })).toBe('进行中，截至昨日');
+    expect(trendPointStatusText({ in_progress: true, missing: false })).toBe('进行中');
     expect(trendPointStatusText({ in_progress: false, missing: true })).toBe('数据不完整');
-    expect(trendPointStatusText({ in_progress: true, missing: true })).toBe('进行中，截至昨日 · 数据不完整');
+    expect(trendPointStatusText({ in_progress: true, missing: true })).toBe('进行中 · 数据不完整');
   });
 });
 
 describe('revenue trend option helpers', () => {
+  it('retains the failed source during a silent same-query refresh and replaces only the successful source', () => {
+    const previous = { points: [{ period: '2026-08-12', net_income: 100, order_count: 10, missing: false }], moving_averages: [], store_trends: {} };
+    const updated = { points: [{ period: '2026-08-12', net_income: 80, order_count: 8, missing: false }], moving_averages: [], store_trends: {} };
+    expect(revenueSourceData(null, previous, true).points).toEqual(previous.points);
+    expect(revenueSourceData(updated, previous, true).points[0].net_income).toBe(80);
+    expect(revenueSourceData(null, previous, false).points).toEqual([]);
+  });
   describe('integer-cent money aggregation', () => {
     it('sums 0.1 and 0.2 exactly', () => {
       expect(summarizeRevenueTrend([
@@ -511,6 +521,126 @@ describe('revenue trend option helpers', () => {
     expect(tooltip).toContain('门店&lt;img src=x onerror=evil(1)&gt;');
     expect(tooltip).not.toContain('2026-07-19<b>');
     expect(tooltip).not.toContain('门店<img');
+  });
+});
+
+describe('DashboardPage realtime refresh', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-08-12T04:00:00Z'));
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+  });
+
+  it('reads the newest server data every five minutes while retaining the visible cards', async () => {
+    const { unmount } = render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalled());
+    await waitFor(() => expect((within(screen.getByTestId('dashboard-desktop-controls')).getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(analyticsApi.getRevenueTrend.mock.calls.slice(-1)[0]?.[1]).toBe('2026-08-12');
+    const previousCalls = analyticsApi.getRevenueTrend.mock.calls.length;
+    const pending = deferred<unknown>();
+    operationsApi.fetchOperationsOverview.mockReturnValueOnce(pending.promise);
+
+    await act(async () => vi.advanceTimersByTimeAsync(300000));
+
+    expect(analyticsApi.getRevenueTrend.mock.calls.length).toBeGreaterThan(previousCalls);
+    expect(analyticsApi.getRevenueTrend).toHaveBeenLastCalledWith(
+      expect.any(String), '2026-08-12', 'ALL', 'all',
+      expect.objectContaining({ revalidate: true, forceRefresh: false }),
+    );
+    expect(analyticsApi.getMealPeriodTrend).toHaveBeenLastCalledWith(
+      'ALL', expect.any(String), '2026-08-12', expect.objectContaining({ includeCurrent: true }),
+    );
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ refresh: false, filters: expect.objectContaining({ includeCurrent: true }) }),
+    );
+    expect(screen.getByText('¥1,000.00')).toBeTruthy();
+    expect(screen.queryByText('刷新中…')).toBeNull();
+    const signal = operationsApi.fetchOperationsOverview.mock.calls.slice(-1)[0]?.[0].signal as AbortSignal;
+    unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => pending.resolve({}));
+  });
+
+  it('rechecks V2 day versions without forcing a rebuild and skips fallback requests', async () => {
+    dailyFactsApi.getOrderDailyFacts.mockResolvedValue([]);
+    dailyFactsApi.getMealDailyFacts.mockResolvedValue([]);
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    await act(async () => vi.advanceTimersByTimeAsync(300000));
+    expect(dailyFactsApi.getOrderDailyFacts.mock.calls.length).toBeGreaterThan(1);
+    expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenLastCalledWith(
+      expect.any(String), '2026-08-12', {},
+      expect.objectContaining({ forceRefresh: false, signal: expect.any(AbortSignal) }),
+    );
+    expect(analyticsApi.getRevenueTrend).not.toHaveBeenCalled();
+    expect(analyticsApi.getMealPeriodTrend).not.toHaveBeenCalled();
+  });
+
+  it('pauses in the background and rechecks the server immediately on return', async () => {
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalled());
+    const count = analyticsApi.getRevenueTrend.mock.calls.length;
+    act(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(600000));
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(count);
+    await act(async () => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(analyticsApi.getRevenueTrend.mock.calls.length).toBeGreaterThan(count);
+  });
+
+  it('revalidates immediately when reopening before the previous five-minute cache age', async () => {
+    const first = render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(1));
+    first.unmount();
+    await act(async () => vi.advanceTimersByTimeAsync(299999));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(2));
+    expect(analyticsApi.getRevenueTrend).toHaveBeenLastCalledWith(
+      expect.any(String), '2026-08-12', 'ALL', 'all',
+      expect.objectContaining({ revalidate: true, forceRefresh: false }),
+    );
+    expect(operationsApi.fetchOperationsOverview.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('stops polling and preserves the selected historical range across midnight when excluding the current week', async () => {
+    vi.setSystemTime(new Date('2026-08-12T15:58:00Z'));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByText('周')[0]);
+    await waitFor(() => expect((screen.getAllByRole('checkbox')[0] as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    await waitFor(() => expect(analyticsApi.getRevenueTrend.mock.calls.slice(-1)[0]?.[4]).toEqual(expect.objectContaining({ includeCurrent: false })));
+    const count = analyticsApi.getRevenueTrend.mock.calls.length;
+    const selectedDates = screen.getAllByRole('textbox').map(input => (input as HTMLInputElement).value);
+    await act(async () => vi.advanceTimersByTimeAsync(600000));
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(count);
+    expect(screen.getAllByRole('textbox').map(input => (input as HTMLInputElement).value)).toEqual(selectedDates);
+  });
+
+  it('rolls a relative range forward at Beijing midnight', async () => {
+    vi.setSystemTime(new Date('2026-08-12T15:58:00Z'));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalled());
+    await act(async () => vi.advanceTimersByTimeAsync(300000));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend.mock.calls.slice(-1)[0]?.slice(0, 2)).toEqual(['2026-08-04', '2026-08-13']));
+  });
+
+  it('removes cached cards and stops polling after a permission denial', async () => {
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    operationsApi.fetchOperationsOverview.mockRejectedValueOnce(Object.assign(new Error('无权访问'), { status: 403 }));
+    await act(async () => vi.advanceTimersByTimeAsync(300000));
+    expect(screen.queryByText('¥1,000.00')).toBeNull();
+    expect(screen.getByText('无权访问经营数据')).toBeTruthy();
+    const count = operationsApi.fetchOperationsOverview.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(600000));
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenCalledTimes(count);
   });
 });
 
@@ -751,7 +881,7 @@ describe('DashboardPage meal metric switch', () => {
     expect(await screen.findByText('已选范围净实收趋势')).toBeTruthy();
   });
 
-  it('switches to five completed weeks and keeps the picker controlled', async () => {
+  it('switches to five weeks including the current week and keeps the picker controlled', async () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
     const periodControls = await screen.findAllByLabelText('趋势粒度');
 
@@ -762,7 +892,7 @@ describe('DashboardPage meal metric switch', () => {
       expect.any(String),
       expect.any(String),
       expect.any(String),
-      expect.objectContaining({ granularity: 'week', includeCurrent: false }),
+      expect.objectContaining({ granularity: 'week', includeCurrent: true }),
     ));
     const latestWeekEnd = analyticsApi.getRevenueTrend.mock.calls[analyticsApi.getRevenueTrend.mock.calls.length - 1]?.[1] as string;
     await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(
@@ -1388,8 +1518,8 @@ describe('DashboardPage meal metric switch', () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
     await waitFor(() => expect(dailyFactsApi.getMealDailyFacts).toHaveBeenCalledTimes(1));
     expect(dailyFactsApi.getMealDailyFacts).toHaveBeenCalledWith(
-      '2026-02-04',
-      '2026-08-11',
+      '2026-02-05',
+      '2026-08-12',
       {},
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -1482,6 +1612,6 @@ describe('DashboardPage meal metric switch', () => {
     await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(2));
     const options = analyticsApi.getRevenueTrend.mock.calls[1][4];
     expect(options).toEqual(expect.objectContaining({ revalidate: true }));
-    expect(options.forceRefresh).toBeUndefined();
+    expect(options.forceRefresh).toBe(false);
   });
 });
