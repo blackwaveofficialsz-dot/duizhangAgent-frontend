@@ -24,7 +24,17 @@ import {
 const labels = { '101': '门店A', '102': '门店B' };
 
 describe('multi-store chart series', () => {
-  it('keeps partial primary values visible while missing stays metadata', () => {
+  it('leaves revenue gaps for missing snapshots while retaining published zeroes', () => {
+    const points = [
+      { period: '2026-11-23', net_income: 120, order_count: 6, missing: false },
+      { period: '2026-11-24', net_income: 0, order_count: 0, missing: true },
+      { period: '2026-11-25', net_income: 0, order_count: 0, missing: false, in_progress: true },
+    ];
+    expect(buildRevenueStoreSeries({ '101': points }, labels)[0].data).toEqual([120, null, 0]);
+    expect(buildRevenueStoreSourceSeries({ '101': points }, { '101': points }, labels).map(series => series.data)).toEqual([[120, null, 0], [120, null, 0]]);
+  });
+
+  it('leaves incomplete revenue gaps while preserving product and labor partial values', () => {
     const revenue = buildRevenueStoreSeries({
       '101': [{ period: '2026-W29', net_income: 120, order_count: 6, missing: true }],
     }, labels);
@@ -38,7 +48,7 @@ describe('multi-store chart series', () => {
       }],
     }, labels, 'hours');
 
-    expect(revenue[0].data).toEqual([120]);
+    expect(revenue[0].data).toEqual([null]);
     expect(product[0].data).toEqual([8]);
     expect(labor[0].data).toEqual([12]);
     expect(labor[1].data).toEqual([14]);

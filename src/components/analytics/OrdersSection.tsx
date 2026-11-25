@@ -757,11 +757,13 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         />
       </div>
       <ComparisonPeriodNote previousPeriod={comparisonOverview?.previous_period} />
-      {rows.length > 0 && (
+      {chartRows.length > 0 ? (
         <Suspense fallback={<div className="mb-4 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-400">图表加载中…</div>}>
           <OrderCharts rows={chartRows} dimLabel="分店铺" onFullscreen={() => openFullscreen('orders-share')} />
         </Suspense>
-      )}
+      ) : comparisonOverview && !loading ? (
+        <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-center text-sm text-slate-400">暂无已发布数据</div>
+      ) : null}
       {repairing && (
         <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700" role="status" aria-live="polite">
           <div className="mb-2 flex items-center justify-between gap-3">
@@ -879,12 +881,12 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         )}
         onClose={closeFullscreen}
       >
-        {rows.length > 0 ? (
+        {chartRows.length > 0 ? (
           <Suspense fallback={<div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">图表加载中…</div>}>
             <OrderCharts rows={chartRows} dimLabel="分店铺" fullscreen />
           </Suspense>
         ) : (
-          <div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">暂无占比数据</div>
+          <div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">暂无已发布数据</div>
         )}
       </ChartFullscreenLayer>
     ) : null}

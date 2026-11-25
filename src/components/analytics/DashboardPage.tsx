@@ -58,7 +58,7 @@ import {
   buildRevenueStoreSourceSeries,
   buildRevenueStoreSeries,
   selectRevenueStorePoints,
-  trendPrimaryValues,
+  revenuePrimaryValue,
 } from "./multiStoreSeries";
 import {
   resolveStoreScopeSelection,
@@ -637,16 +637,9 @@ const TrendMainChart = memo(function TrendMainChart({
       ),
     ].sort();
   }, [compare, points, storeSourceTrends]);
-  const seriesData = (
-    rows: RevenueTrendPoint[],
-    field = "net_income",
-  ) => {
+  const seriesData = (rows: RevenueTrendPoint[]) => {
     const byPeriod = new Map(rows.map((point) => [point.period, point]));
-    return periods.map((period) => {
-      const point = byPeriod.get(period);
-      const value = point?.[field];
-      return point && typeof value === "number" ? value : null;
-    });
+    return periods.map(period => revenuePrimaryValue(byPeriod.get(period)));
   };
   const statusPoints = [
     ...points,
@@ -746,7 +739,7 @@ const TrendMainChart = memo(function TrendMainChart({
               type: "line",
               smooth: true,
               symbolSize: 5,
-              data: trendPrimaryValues(points, "net_income"),
+              data: points.map(revenuePrimaryValue),
             },
             ...buildRevenueMovingAverageSeries(points, periods, movingAverages),
           ],
@@ -2522,7 +2515,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       {realtimeRange ? <div role="status" className="text-xs text-slate-500">
         {freshness?.mode === "realtime" ? "实时订单（持续更新）" : "含今日订单"} · 每5分钟自动更新
         {freshness?.data_as_of ? ` · 数据截至 ${formatBeijingTime(freshness.data_as_of, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}
-        {refreshFailed || freshness?.status === "unavailable" ? " · 更新失败，保留上次数据" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
+        {refreshFailed ? " · 更新失败，保留上次数据" : freshness?.status === "unavailable" ? " · 今日数据尚未就绪，等待发布" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
       </div> : null}
       <div className="rounded-lg border border-slate-200 bg-white p-4 md:p-5">
         <div className="md:hidden">

@@ -39,6 +39,10 @@ export function trendPrimaryValues<T, K extends keyof T>(points: T[], field: K):
   return points.map(point => typeof point[field] === 'number' ? point[field] as number : null);
 }
 
+export function revenuePrimaryValue(point: RevenueTrendPoint | undefined): number | null {
+  return point && !point.missing && typeof point.net_income === 'number' ? point.net_income : null;
+}
+
 export function selectedStoreTrendMap<T>(
   storeTrends: Record<string, T[]>,
   storeKeys: string[],
@@ -116,7 +120,7 @@ export function buildRevenueStoreSeries(
       symbolSize: 5,
       lineStyle: { color },
       itemStyle: { color },
-      data: trendPrimaryValues(points, 'net_income'),
+      data: points.map(revenuePrimaryValue),
     };
   });
 }
@@ -139,7 +143,7 @@ export function buildRevenueStoreSourceSeries(
         symbolSize: 5,
         lineStyle: { color, type: 'solid' as const },
         itemStyle: { color },
-        data: trendPrimaryValues(shopTrends[key] || [], 'net_income'),
+        data: (shopTrends[key] || []).map(revenuePrimaryValue),
       },
       {
         name: `${label} 外卖`,
@@ -148,7 +152,7 @@ export function buildRevenueStoreSourceSeries(
         symbolSize: 5,
         lineStyle: { color, type: 'dashed' as const },
         itemStyle: { color },
-        data: trendPrimaryValues(takeoutTrends[key] || [], 'net_income'),
+        data: (takeoutTrends[key] || []).map(revenuePrimaryValue),
       },
     ];
   });

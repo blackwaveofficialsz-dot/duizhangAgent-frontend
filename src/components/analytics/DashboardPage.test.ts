@@ -11,6 +11,16 @@ const analyticsApi = vi.hoisted(() => ({
   listShopMappings: vi.fn(),
 }));
 
+const renderedCharts = vi.hoisted(() => new Map<HTMLElement, { series: Array<{ data: Array<number | null> }> }>());
+vi.mock('echarts/core', () => ({
+  use: () => {},
+  init: (container: HTMLElement) => ({
+    on: () => {}, off: () => {}, resize: () => {}, dispose: () => {}, isDisposed: () => false,
+    getOption: () => ({}),
+    setOption: (option: { series: Array<{ data: Array<number | null> }> }) => renderedCharts.set(container, option),
+  }),
+}));
+
 vi.mock('../../api/analytics', () => analyticsApi);
 
 const operationsApi = vi.hoisted(() => ({
@@ -529,6 +539,57 @@ describe('DashboardPage realtime refresh', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date('2026-08-12T04:00:00Z'));
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+  });
+
+  it('shows successful unavailable publication as waiting rather than a failed request', async () => {
+    const base = await defaultOverviewRequest();
+    operationsApi.fetchOperationsOverview.mockResolvedValue({ ...base, freshness: {
+      mode: 'realtime', provisional: true, status: 'unavailable', snapshot_version: null,
+      data_as_of: null, generated_at: '2026-08-12T12:00:00+08:00', refresh_interval_seconds: 300,
+    } });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText(/今日数据尚未就绪，等待发布/)).toBeTruthy();
+    expect(screen.queryByText(/更新失败，保留上次数据/)).toBeNull();
+  });
+
+  it('retains published cards and reports a real request failure during refresh', async () => {
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    await waitFor(() => expect((within(screen.getByTestId('dashboard-desktop-controls')).getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false));
+    operationsApi.fetchOperationsOverview.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { status: 503 }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
+    expect(screen.getByText(/更新失败，保留上次数据/)).toBeTruthy();
+    expect(screen.getByText('¥1,000.00')).toBeTruthy();
+  });
+
+  it.each([
+    { mode: 'primary', label: '净实收趋势主图', expected: [[100, null, 0]] },
+    { mode: 'source comparison', label: '堂食和外卖净实收趋势对比图', expected: [[100, null, 0], [100, null, 0]] },
+  ])('sends gaps rather than zeroes to the $mode chart', async ({ mode, label, expected }) => {
+    vi.stubEnv('MODE', 'production');
+    const userAgent = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('chart-regression');
+    renderedCharts.clear();
+    try {
+      const points = [
+        { period: '2026-08-10', net_income: 100, order_count: 5, missing: false },
+        { period: '2026-08-11', net_income: 0, order_count: 0, missing: true },
+        { period: '2026-08-12', net_income: 0, order_count: 0, missing: false, in_progress: true },
+      ];
+      analyticsApi.getRevenueTrend.mockResolvedValue({ points, moving_averages: [] });
+      render(createElement(DashboardPage, { show: vi.fn() }));
+      await screen.findByRole('img', { name: '净实收趋势主图' });
+      if (mode === 'source comparison') {
+        const controls = screen.getAllByText('堂食/外卖');
+        fireEvent.click(controls[controls.length - 1]);
+      }
+      const chart = await screen.findByRole('img', { name: label });
+      await waitFor(() => expect(renderedCharts.get(chart)?.series.slice(0, expected.length).map(series => series.data)).toEqual(expected));
+    } finally {
+      cleanup();
+      renderedCharts.clear();
+      userAgent.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('publishes revenue while an independent meal request is still pending', async () => {
