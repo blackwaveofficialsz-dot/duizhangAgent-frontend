@@ -49,7 +49,7 @@ export function AnalyticsPage() {
             <DashboardPage key={dashboardScope} show={show} />
           </Suspense>
         )}
-        {tab === 'orders' && <OrdersSection show={show} canManage={canManage} />}
+        {tab === 'orders' && <OrdersSection key={dashboardScope} show={show} canManage={canManage} />}
         {canManage && tab === 'settings' && <SettingsSection show={show} />}
         {tab === 'labor' && <LaborSection show={show} />}
         {tab === 'product' && <ProductSection show={show} />}

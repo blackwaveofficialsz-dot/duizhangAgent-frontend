@@ -84,6 +84,7 @@ export function OrderStoreDetailModal({
   seedFacts,
   todayYmd,
   onClose,
+  onPermissionDenied,
 }: {
   open: boolean;
   store: StoreRef | null;
@@ -93,12 +94,13 @@ export function OrderStoreDetailModal({
   seedFacts: OrderDailyFact[];
   todayYmd?: string;
   onClose: () => void;
+  onPermissionDenied?: () => void;
 }) {
   const isMobile = useIsMobile();
   const today = todayYmd || new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
-  const initialRange = defaultTrendRange(initialGranularity, today);
+  const initialRange = defaultTrendRange(initialGranularity, today, true);
   const [granularity, setGranularity] = useState<TrendGranularity>(initialGranularity);
   const [dateFrom, setDateFrom] = useState(initialRange.dateFrom);
   const [dateTo, setDateTo] = useState(initialRange.dateTo);
@@ -109,14 +111,19 @@ export function OrderStoreDetailModal({
   const [sessionFacts, setSessionFacts] = useState<OrderDailyFact[]>(seedFacts);
   const requestRef = useRef<AbortController | null>(null);
   const requestedRangeRef = useRef('');
+  const accessRevokedRef = useRef(false);
+  const permissionCallbackRef = useRef(onPermissionDenied);
+  permissionCallbackRef.current = onPermissionDenied;
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
   useEffect(() => {
+    if (accessRevokedRef.current) return;
     setSessionFacts(current => mergeFacts(current, seedFacts));
   }, [seedFacts]);
 
   useEffect(() => {
     if (!open) return;
-    const range = defaultTrendRange(initialGranularity, today);
+    const range = defaultTrendRange(initialGranularity, today, true);
     setGranularity(initialGranularity);
     setDateFrom(range.dateFrom);
     setDateTo(range.dateTo);
@@ -126,7 +133,7 @@ export function OrderStoreDetailModal({
   }, [open, store?.storeKey, initialGranularity, today]);
 
   useEffect(() => {
-    if (!open || !store) return;
+    if (!open || !store || accessRevokedRef.current) return;
     const [previousFrom] = previousRange(dateFrom, dateTo);
     const historyFrom = trendHistoryStart(granularity, dateFrom);
     const fetchFrom = historyFrom < previousFrom ? historyFrom : previousFrom;
@@ -140,7 +147,18 @@ export function OrderStoreDetailModal({
       .then((records: DailyFactRecord<OrderDailyFact>[]) => {
         if (!controller.signal.aborted) setSessionFacts(current => mergeFacts(current, records.map(record => record.payload)));
       })
-      .catch(() => {});
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        if (typeof error === 'object' && error !== null && 'status' in error
+          && (error.status === 401 || error.status === 403)) {
+          accessRevokedRef.current = true;
+          requestRef.current?.abort();
+          requestRef.current = null;
+          setSessionFacts([]);
+          setPermissionDenied(true);
+          permissionCallbackRef.current?.();
+        }
+      });
     return () => controller.abort();
   }, [open, store?.storeKey, granularity, dateFrom, dateTo, sessionFacts]);
 
@@ -201,23 +219,25 @@ export function OrderStoreDetailModal({
   ])), [activeBreakdowns, dateFrom, dateTo, granularity, secondaryDimension, store, storeFacts]);
   const latest = detailRows[detailRows.length - 1];
   const totalNetIncome = detailRows.reduce((sum, row) => sum + row.totals.net_income_cent, 0);
+  const hasSummaryData = visibleFacts.length > 0 && detailRows.length > 0;
 
+  const compareHistorical = comparisonMode === 'previous' && dateTo < today;
   const comparisonCell = (
     value: string | number,
     comparison: OrderStorePeriodRow['comparison'][keyof OrderStorePeriodRow['comparison']],
     format: ComparisonValueFormat,
-  ): TableDisplayCell => comparisonMode === 'none'
+  ): TableDisplayCell => !compareHistorical
     ? value
     : { value, comparisons: comparisonDisplayItems(displayComparison(comparison, format), displayMode, format) };
   const baseMetricColumns: TableColumnsType<OrderStorePeriodRow> = [
     { title: '周期', dataIndex: 'label', key: 'label', fixed: 'left' },
-    { title: '订单数', key: 'orders', align: 'right', render: (_, row) => <><div>{row.metrics.order_count}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={row.comparison.order_count} displayMode={displayMode} format="integer" />}</> },
-    { title: '营业额', key: 'paid', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.paid_amount_cent)}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={displayComparison(row.comparison.paid_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
-    { title: '实收', key: 'income', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.income_amount_cent)}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={displayComparison(row.comparison.income_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
-    { title: '退款', key: 'refund', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.refund_amount_cent)}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={displayComparison(row.comparison.refund_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
-    { title: '净实收', key: 'net', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.net_income_cent)}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={displayComparison(row.comparison.net_income_cent, 'money')} displayMode={displayMode} format="money" />}</> },
-    { title: '客单价', key: 'aov', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.avg_order_value_cent)}</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={displayComparison(row.comparison.avg_order_value_cent, 'money')} displayMode={displayMode} format="money" />}</> },
-    { title: '退款率', key: 'rate', align: 'right', render: (_, row) => <><div>{(row.metrics.refund_rate * 100).toFixed(2)}%</div>{comparisonMode === 'previous' && <PeriodComparisonRate comparison={row.comparison.refund_rate} displayMode={displayMode} format="percentagePoint" />}</> },
+    { title: '订单数', key: 'orders', align: 'right', render: (_, row) => <><div>{row.metrics.order_count}</div>{compareHistorical && <PeriodComparisonRate comparison={row.comparison.order_count} displayMode={displayMode} format="integer" />}</> },
+    { title: '营业额', key: 'paid', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.paid_amount_cent)}</div>{compareHistorical && <PeriodComparisonRate comparison={displayComparison(row.comparison.paid_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
+    { title: '实收', key: 'income', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.income_amount_cent)}</div>{compareHistorical && <PeriodComparisonRate comparison={displayComparison(row.comparison.income_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
+    { title: '退款', key: 'refund', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.refund_amount_cent)}</div>{compareHistorical && <PeriodComparisonRate comparison={displayComparison(row.comparison.refund_amount_cent, 'money')} displayMode={displayMode} format="money" />}</> },
+    { title: '净实收', key: 'net', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.net_income_cent)}</div>{compareHistorical && <PeriodComparisonRate comparison={displayComparison(row.comparison.net_income_cent, 'money')} displayMode={displayMode} format="money" />}</> },
+    { title: '客单价', key: 'aov', align: 'right', render: (_, row) => <><div>{yuanFromCent(row.metrics.avg_order_value_cent)}</div>{compareHistorical && <PeriodComparisonRate comparison={displayComparison(row.comparison.avg_order_value_cent, 'money')} displayMode={displayMode} format="money" />}</> },
+    { title: '退款率', key: 'rate', align: 'right', render: (_, row) => <><div>{(row.metrics.refund_rate * 100).toFixed(2)}%</div>{compareHistorical && <PeriodComparisonRate comparison={row.comparison.refund_rate} displayMode={displayMode} format="percentagePoint" />}</> },
   ];
   const metricColumns = baseMetricColumns.slice(1);
   const columns: TableColumnsType<OrderStorePeriodRow> = secondaryDimension === 'none'
@@ -262,7 +282,7 @@ export function OrderStoreDetailModal({
   }];
 
   const changeGranularity = (next: TrendGranularity) => {
-    const range = defaultTrendRange(next, today);
+    const range = defaultTrendRange(next, today, true);
     setGranularity(next);
     setDateFrom(range.dateFrom);
     setDateTo(range.dateTo);
@@ -276,12 +296,14 @@ export function OrderStoreDetailModal({
       footer={null}
       destroyOnHidden={false}
       width={isMobile ? '100%' : 1180}
-      title={`${store?.storeLabel || ''}订单趋势`}
+      title={permissionDenied ? '订单趋势' : `${store?.storeLabel || ''}订单趋势`}
       styles={{ body: { maxHeight: isMobile ? 'calc(100vh - 90px)' : '78vh', overflowY: 'auto' } }}
     >
-      <div className="space-y-4">
+      {permissionDenied ? <div role="alert">暂无权限查看经营数据</div> : <div className="space-y-4">
+        {dateTo >= today && <p className="text-xs text-slate-500">今日数据为实时暂估，暂不与完整历史周期比较</p>}
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-3">
           <TrendPeriodControls
+            allowToday
             granularity={granularity}
             dateFrom={dateFrom}
             dateTo={dateTo}
@@ -297,12 +319,12 @@ export function OrderStoreDetailModal({
         <div className="grid gap-3 md:grid-cols-3">
           <PeriodMetricCard
             label="区间净实收"
-            value={yuanFromCent(totalNetIncome)}
-            comparison={comparisonMode === 'previous' ? displayComparison(rangeComparison.net_income_cent, 'money') : undefined}
+            value={hasSummaryData ? yuanFromCent(totalNetIncome) : '—'}
+            comparison={compareHistorical ? displayComparison(rangeComparison.net_income_cent, 'money') : undefined}
             displayMode={displayMode}
           />
-          <PeriodMetricCard label="最近周期净实收" value={yuanFromCent(latest?.metrics.net_income_cent || 0)} comparison={comparisonMode === 'previous' && latest ? displayComparison(latest.comparison.net_income_cent, 'money') : undefined} displayMode={displayMode} />
-          <PeriodMetricCard label="最近周期订单数" value={String(latest?.metrics.order_count || 0)} comparison={comparisonMode === 'previous' ? latest?.comparison.order_count : undefined} displayMode={displayMode} format="integer" />
+          <PeriodMetricCard label="最近周期净实收" value={hasSummaryData && latest ? yuanFromCent(latest.metrics.net_income_cent) : '—'} comparison={compareHistorical && latest ? displayComparison(latest.comparison.net_income_cent, 'money') : undefined} displayMode={displayMode} />
+          <PeriodMetricCard label="最近周期订单数" value={hasSummaryData && latest ? String(latest.metrics.order_count) : '—'} comparison={compareHistorical ? latest?.comparison.order_count : undefined} displayMode={displayMode} format="integer" />
         </div>
         <Segmented
           aria-label="单店详情视图"
@@ -322,7 +344,7 @@ export function OrderStoreDetailModal({
             <Table bordered columns={columns} dataSource={detailRows} rowKey="key" pagination={false} size="small" scroll={{ x: 'max-content' }} />
           </TableDisplayFrame>
         )}
-      </div>
+      </div>}
     </Modal>
   );
 }

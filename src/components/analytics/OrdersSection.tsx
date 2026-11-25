@@ -15,6 +15,7 @@ import { useChannelStore } from '../../store/channelStore';
 import { useEmployeeStore } from '../../store/employeeStore';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { usePolling } from '../../hooks/usePolling';
+import { currentBeijingDate } from '../../utils/time';
 import { EmployeeMultiSelect } from '../EmployeeMultiSelect';
 import {
   TableDisplayFrame,
@@ -45,12 +46,17 @@ import {
   type ComparisonValueFormat,
 } from './PeriodComparison';
 import {
-  Card, FUTURE_DATE_MESSAGE, MobileDatePopup, MobileField, MobileInlineFilter, canViewPeriod,
-  displayInsightContent, inputCls, isAbortError, orderPeriodNote, parseYmd, periodIncludesToday, periodKey,
-  periodDateRange, periodLabel, searchableSelectProps, shiftAnchor, ymd, yesterday, yuan,
+  Card, MobileDatePopup, MobileField, MobileInlineFilter, canViewPeriod,
+  displayInsightContent, inputCls, isAbortError, orderPeriodNote, parseYmd, periodKey,
+  periodDateRange, periodLabel, searchableSelectProps, shiftAnchor, ymd, yuan,
 } from './shared';
 
 const OrderCharts = lazy(() => import('./OrderCharts').then(module => ({ default: module.OrderCharts })));
+
+function isPermissionError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'status' in error
+    && (error.status === 401 || error.status === 403);
+}
 
 type OrderComparisonMetricKey =
   | 'order_count'
@@ -257,7 +263,11 @@ function orderFactFromRecord(record: DailyFactRecord<OrderDailyFact>): OrderDail
 export function OrdersSection({ show, canManage }: { show: (m: string) => void; canManage: boolean }) {
   const isMobile = useIsMobile();
   const [gran, setGran] = useState('day');
-  const [anchor, setAnchor] = useState(yesterday);
+  const [today, setToday] = useState(currentBeijingDate);
+  const [anchor, setAnchor] = useState(() => parseYmd(currentBeijingDate()));
+  const followTodayRef = useRef(true);
+  const accessRevokedRef = useRef(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
   const [secondaryDimension, setSecondaryDimension] = useState<OrderSecondaryDimension>('none');
   const [platformLabels, setPlatformLabels] = useState<Record<string, string>>({});
   const [detailStore, setDetailStore] = useState<{ storeKey: string; storeLabel: string } | null>(null);
@@ -283,7 +293,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const repairResetTimerRef = useRef<number | null>(null);
   const { fullscreenChart, fullscreenPortrait, openFullscreen, closeFullscreen } = useAnalyticsChartFullscreen<'orders-share'>();
   const period = useMemo(() => periodKey(gran, anchor), [gran, anchor]);
-  const excludeToday = useMemo(() => periodIncludesToday(gran, anchor), [gran, anchor]);
+  const excludeToday = false;
   const dim = secondaryDimension === 'none' ? 'shop' : `shop_${secondaryDimension}`;
   const dimText = secondaryDimension === 'none'
     ? '分店铺'
@@ -292,21 +302,25 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const periodDescription = useMemo(() => orderPeriodNote(gran, anchor, excludeToday), [gran, anchor, excludeToday]);
   const comparisonRange = useMemo(() => {
     const [dateFrom, rawDateTo] = periodDateRange(gran, anchor);
-    const latestCompleteDate = ymd(yesterday());
-    return [dateFrom, rawDateTo > latestCompleteDate ? latestCompleteDate : rawDateTo] as const;
-  }, [gran, anchor]);
+    return [dateFrom, rawDateTo > today ? today : rawDateTo] as const;
+  }, [gran, anchor, today]);
+  const includeCurrent = comparisonRange[0] <= today && comparisonRange[1] >= today;
   const orderFactQueryKey = `${comparisonRange[0]}|${comparisonRange[1]}|${ordersFactRefreshSeq}`;
   const defaultReport = gran === 'week' ? 'order_weekly' : gran === 'month' ? 'order_monthly' : 'order_daily';
   const pickerMode: 'date' | 'week' | 'month' = gran === 'week' ? 'week' : gran === 'month' ? 'month' : 'date';
   const changeGranularity = (value: string) => {
+    setToday(currentBeijingDate());
     setGran(value);
-    setAnchor(yesterday());
+    followTodayRef.current = true;
+    setAnchor(parseYmd(currentBeijingDate()));
   };
   const setAnchorIfAllowed = (next: Date) => {
-    if (!canViewPeriod(gran, next)) {
-      show(FUTURE_DATE_MESSAGE);
+    if (!canViewPeriod(gran, next, true)) {
+      show('当前只能查看截至今天的数据，无法查看后续日期。');
       return;
     }
+    setToday(currentBeijingDate());
+    followTodayRef.current = ymd(next) === currentBeijingDate();
     setAnchor(next);
   };
   const moveAnchor = (delta: number) => {
@@ -314,7 +328,27 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   };
 
 
+  const denyAccess = () => {
+    accessRevokedRef.current = true;
+    loadSeqRef.current++;
+    loadAbortRef.current?.abort();
+    orderFactAbortRef.current?.abort();
+    if (repairResetTimerRef.current !== null) window.clearTimeout(repairResetTimerRef.current);
+    repairResetTimerRef.current = null;
+    setRows([]);
+    setOrderFacts([]);
+    setComparisonOverview(null);
+    setExcluded(null);
+    setDetailStore(null);
+    setPushOpen(false);
+    closeFullscreen();
+    setRepairing(false);
+    setLoading(false);
+    setPermissionDenied(true);
+  };
+
   const applyOperationsOverview = (overview: OperationsOverview) => {
+    if (accessRevokedRef.current) return;
     setComparisonOverview(overview);
     setRows(buildOrderStoreRowsFromOperationsOverview(overview, secondaryDimension));
     setExcluded(null);
@@ -324,9 +358,13 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       window.clearTimeout(repairResetTimerRef.current);
       repairResetTimerRef.current = null;
     }
-    if (status === 'partial') {
+    const historicalGap = overview.completeness.missing_dates?.some(date => date < today);
+    if (status === 'partial' && (!includeCurrent || historicalGap)) {
       setRepairing(true);
       setRepairProgress(p => Math.max(p, 12));
+    } else if (includeCurrent && !historicalGap && status !== 'ready') {
+      setRepairing(false);
+      setRepairProgress(0);
     } else if (status === 'ready') {
       setRepairProgress(100);
       repairResetTimerRef.current = window.setTimeout(() => {
@@ -347,20 +385,25 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       dateTo: comparisonRange[1],
       compare: comparisonMode,
       orderBreakdown: secondaryDimension,
+      includeCurrent,
     },
     signal,
     refresh,
   });
 
-  const load = (refresh = false, backfill = false, clear = true) => {
-    if (!canViewPeriod(gran, anchor)) {
-      show(FUTURE_DATE_MESSAGE);
+  const load = (refresh = false, backfill = false, clear = true, signal?: AbortSignal) => {
+    if (accessRevokedRef.current) return;
+    if (!canViewPeriod(gran, anchor, true)) {
+      show('当前只能查看截至今天的数据，无法查看后续日期。');
       return;
     }
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     loadAbortRef.current?.abort();
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
     loadAbortRef.current = controller;
     if (clear) {
       setLoading(true);
@@ -369,12 +412,12 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
     const repairRequest = (refresh || backfill)
       ? getOrders(gran, period, dim, refresh, backfill, true, excludeToday, { signal: controller.signal })
       : Promise.resolve(null);
-    Promise.all([
+    return Promise.all([
       loadOperationsOverview(controller.signal, refresh),
       repairRequest,
     ])
       .then(([overview, repairResult]) => {
-        if (seq !== loadSeqRef.current) return;
+        if (seq !== loadSeqRef.current || controller.signal.aborted || accessRevokedRef.current) return;
         applyOperationsOverview(overview);
         if (repairResult?.refresh_queued || repairResult?.backfill_queued) {
           if (repairResetTimerRef.current !== null) {
@@ -389,9 +432,12 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       })
       .catch(e => {
         if (seq !== loadSeqRef.current || isAbortError(e)) return;
-        show((e as Error).message);
+        if (isPermissionError(e)) { denyAccess(); return; }
+        if (clear) show((e as Error).message);
       })
       .finally(() => {
+        signal?.removeEventListener('abort', abort);
+        if (loadAbortRef.current === controller) loadAbortRef.current = null;
         if (seq !== loadSeqRef.current) return;
         if (clear) setLoading(false);
       });
@@ -408,10 +454,12 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
     })
       .then((records: DailyFactRecord<OrderDailyFact>[]) => {
         if (controller.signal.aborted) return;
+        if (accessRevokedRef.current) return;
         setOrderFacts(records.map(orderFactFromRecord));
       })
       .catch((error) => {
         if (controller.signal.aborted) return;
+        if (isPermissionError(error)) { denyAccess(); return; }
         setOrderFacts([]);
         if (forceRefresh) show(error instanceof Error ? error.message : String(error));
       });
@@ -454,16 +502,26 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
 
   usePolling(
     async (signal) => {
-      const seq = loadSeqRef.current;
-      try {
-        const overview = await loadOperationsOverview(signal);
-        if (seq === loadSeqRef.current && !signal.aborted) applyOperationsOverview(overview);
-      } catch {
-        // 修复轮询失败时等待下一轮；Abort 由 usePolling 统一管理。
+      if (accessRevokedRef.current || loading) return;
+      const nextToday = currentBeijingDate();
+      if (nextToday !== today) {
+        setToday(nextToday);
+        if (followTodayRef.current) setAnchor(parseYmd(nextToday));
+        return;
       }
+      await Promise.all([
+        load(false, false, false, signal),
+        !repairing && includeCurrent
+          ? getOrderDailyFacts<OrderDailyFact>(comparisonRange[0], comparisonRange[1], {}, { signal, forceRefresh: false })
+            .then(records => {
+              if (!signal.aborted && !accessRevokedRef.current) setOrderFacts(records.map(orderFactFromRecord));
+            })
+            .catch(error => { if (!signal.aborted && isPermissionError(error)) denyAccess(); })
+          : Promise.resolve(),
+      ]);
     },
-    repairing ? 5000 : null,
-    [gran, period, dim, excludeToday, comparisonMode, comparisonRange, secondaryDimension],
+    permissionDenied ? null : repairing ? 5000 : includeCurrent ? 300000 : null,
+    [gran, period, dim, excludeToday, comparisonMode, comparisonRange, secondaryDimension, includeCurrent],
   );
   useEffect(() => {
     if (!fullscreenChart) setFullscreenFilterExpanded(false);
@@ -613,6 +671,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         {mobile ? (
           <div className="min-w-0 flex-1">
             <MobileDatePopup
+              allowToday
               label={gran === 'day' ? '日期' : gran === 'week' ? '周' : '月份'}
               title={gran === 'day' ? '选择日期' : gran === 'week' ? '选择周内任意一天' : '选择月份内任意一天'}
               hint={periodText}
@@ -634,15 +693,16 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
             inputReadOnly
             needConfirm
             picker={pickerMode}
-            defaultValue={dayjs(anchor)}
+            value={dayjs(anchor)}
             format={gran === 'week' ? 'YYYY-[W]WW' : gran === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD'}
             className="w-[140px]"
-            disabledDate={(current) => Boolean(current && !current.isBefore(dayjs().startOf('day'), 'day'))}
+            onOpenChange={open => { if (open) setToday(currentBeijingDate()); }}
+            disabledDate={(current) => Boolean(current && current.format('YYYY-MM-DD') > today)}
             onOk={value => { if (value) setAnchorIfAllowed(value.toDate()); }}
           />
         </ConfigProvider>
       )}
-      {!mobile && <Button autoInsertSpace={false} htmlType="button" className="h-auto border-0 px-2 py-1.5 text-xs text-slate-500 shadow-none hover:text-slate-700 cursor-pointer" onClick={() => setAnchor(yesterday())}>昨天</Button>}
+      {!mobile && <Button autoInsertSpace={false} htmlType="button" className="h-auto border-0 px-2 py-1.5 text-xs text-slate-500 shadow-none hover:text-slate-700 cursor-pointer" onClick={() => setAnchorIfAllowed(parseYmd(currentBeijingDate()))}>今天</Button>}
       {canManage && <Button autoInsertSpace={false} htmlType="button" className={`h-auto rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50 cursor-pointer ${mobile ? 'w-full' : 'md:ml-auto'}`} onClick={() => setPushOpen(true)}>设为定时推送</Button>}
       <Button autoInsertSpace={false} htmlType="button" className={`h-auto rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer ${mobile ? 'w-full' : ''}`} disabled={loading} onClick={() => {
         setOrdersFactRefreshSeq(value => value + 1);
@@ -653,6 +713,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
     </>
   );
 
+  if (permissionDenied) return <div role="alert">暂无权限查看经营数据</div>;
   return (
     <div className="space-y-4">
     <Card>
@@ -667,6 +728,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
         {renderControls(false)}
       </div>
       {periodDescription && <p className="mb-3 text-xs text-slate-400">{periodDescription}</p>}
+      {includeCurrent && <p className="mb-3 text-xs text-slate-400">今日为已接收订单的实时暂估，每5分钟更新</p>}
       <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <PeriodMetricCard
           label="营业额"
@@ -700,7 +762,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
           <OrderCharts rows={chartRows} dimLabel="分店铺" onFullscreen={() => openFullscreen('orders-share')} />
         </Suspense>
       )}
-      {(repairing || snapshotStatus === 'partial') && (
+      {repairing && (
         <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700" role="status" aria-live="polite">
           <div className="mb-2 flex items-center justify-between gap-3">
             <span className="font-medium">{snapshotStatus === 'partial' ? '已发现快照不完整，等待后台修复' : '正在修复经营分析快照'}</span>
@@ -834,6 +896,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       secondaryDimension={secondaryDimension}
       breakdowns={breakdownKeys.map(key => ({ key, label: breakdownLabel(key) }))}
       seedFacts={orderFacts}
+      onPermissionDenied={denyAccess}
       onClose={() => setDetailStore(null)}
     />
     </div>

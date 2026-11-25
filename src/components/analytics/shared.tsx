@@ -70,9 +70,9 @@ export function periodDateRange(g: string, anchor: Date): [string, string] {
   return [ymd(anchor), ymd(anchor)];
 }
 
-export function canViewPeriod(g: string, anchor: Date): boolean {
+export function canViewPeriod(g: string, anchor: Date, allowToday = false): boolean {
   const [start] = periodDateRange(g, anchor);
-  return start <= daysAgo(1);
+  return start <= daysAgo(allowToday ? 0 : 1);
 }
 
 export function isFutureDate(value: string): boolean {
@@ -274,16 +274,18 @@ export function MobileDatePopup({
   label = '日期',
   title = '选择日期',
   hint,
+  allowToday = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   label?: string;
   title?: string;
   hint?: string;
+  allowToday?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const todayStart = dayjs().startOf('day');
-  const safeValue = clampToPastDate(value);
+  const latest = daysAgo(allowToday ? 0 : 1);
+  const safeValue = value > latest ? latest : value;
   const [draftValue, setDraftValue] = useState(safeValue);
 
   return (
@@ -319,11 +321,11 @@ export function MobileDatePopup({
           <Calendar
             key={`single:${safeValue}`}
             selectionMode="single"
-            defaultValue={parseYmd(safeValue)}
-            max={todayStart.toDate()}
-            shouldDisableDate={(date) => !dayjs(date).isBefore(todayStart, 'day')}
+            value={parseYmd(draftValue)}
+            max={parseYmd(latest)}
+            shouldDisableDate={(date) => ymd(date) > latest}
             onChange={(date) => {
-              if (date) setDraftValue(clampToPastDate(ymd(date)));
+              if (date) setDraftValue(ymd(date) > latest ? latest : ymd(date));
             }}
           />
           <div className="border-t border-slate-100 p-3">

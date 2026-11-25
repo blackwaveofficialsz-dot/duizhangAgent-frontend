@@ -1606,7 +1606,10 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const rangeDayRef = useRef(beijingTodayYmd());
   const accessRevokedRef = useRef(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [refreshFailed, setRefreshFailed] = useState(false);
+  const [revenueRefreshFailed, setRevenueRefreshFailed] = useState(false);
+  const [mealRefreshFailed, setMealRefreshFailed] = useState(false);
+  const [overviewRefreshFailed, setOverviewRefreshFailed] = useState(false);
+  const refreshFailed = revenueRefreshFailed || mealRefreshFailed || overviewRefreshFailed;
   const [trendRange, setTrendRange] = useState(() =>
     defaultTrendRange("day", beijingTodayYmd(), true),
   );
@@ -1643,7 +1646,9 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const [selectedMealPeriod, setSelectedMealPeriod] =
     useState<MealPeriodKey>("lunch");
   const [selectedMealDate, setSelectedMealDate] = useState(dateTo);
-  const [loading, setLoading] = useState(false);
+  const [revenueLoading, setRevenueLoading] = useState(false);
+  const [mealLoading, setMealLoading] = useState(false);
+  const loading = revenueLoading || mealLoading;
   const [detailLoading, setDetailLoading] = useState(false);
   const [fullscreenChart, setFullscreenChart] = useState<
     "revenue" | "meal" | null
@@ -1762,8 +1767,10 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     ...storeLabels,
     ...Object.fromEntries(displayScopes.map(scope => [scope.key, scope.label])),
   }), [displayScopes, storeLabels]);
-  const loadSeqRef = useRef(0);
-  const loadAbortRef = useRef<AbortController | null>(null);
+  const revenueLoadSeqRef = useRef(0);
+  const mealLoadSeqRef = useRef(0);
+  const revenueLoadAbortRef = useRef<AbortController | null>(null);
+  const mealLoadAbortRef = useRef<AbortController | null>(null);
   const orderFactAbortRef = useRef<AbortController | null>(null);
   const mealFactAbortRef = useRef<AbortController | null>(null);
   const orderFactRefreshConsumedRef = useRef(0);
@@ -1775,9 +1782,11 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
 
   const denyAccess = () => {
     accessRevokedRef.current = true;
-    loadSeqRef.current++;
+    revenueLoadSeqRef.current++;
+    mealLoadSeqRef.current++;
     detailLoadSeqRef.current++;
-    loadAbortRef.current?.abort();
+    revenueLoadAbortRef.current?.abort();
+    mealLoadAbortRef.current?.abort();
     detailLoadAbortRef.current?.abort();
     orderFactAbortRef.current?.abort();
     mealFactAbortRef.current?.abort();
@@ -1821,6 +1830,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         dateTo: selectedDetailPeriod.dateTo,
         compare: comparisonMode,
         includeCurrent,
+        orderBreakdown: "none",
       },
       signal: controller.signal,
       refresh: false,
@@ -1856,13 +1866,14 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     silent = false,
   ) => {
     if (accessRevokedRef.current) return;
-    const seq = loadSeqRef.current + 1;
-    loadSeqRef.current = seq;
-    loadAbortRef.current?.abort('ssd load');
+    const revenueSeq = includeRevenue ? ++revenueLoadSeqRef.current : revenueLoadSeqRef.current;
+    const mealSeq = includeMeal ? ++mealLoadSeqRef.current : mealLoadSeqRef.current;
+    if (includeRevenue) revenueLoadAbortRef.current?.abort();
+    if (includeMeal) mealLoadAbortRef.current?.abort();
     const emptyScope = !scopeKeys.includes("ALL") && shopKeys.length === 0;
     if (emptyScope) {
-      loadAbortRef.current = null;
-      setLoading(false);
+      if (includeRevenue) { revenueLoadAbortRef.current = null; setRevenueLoading(false); }
+      if (includeMeal) { mealLoadAbortRef.current = null; setMealLoading(false); }
       setRevenueDisplay({
         trendMode,
         granularity,
@@ -1895,8 +1906,14 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     }
     const controller = new AbortController();
     const releaseAbort = followAbort(signal, controller);
-    loadAbortRef.current = controller;
-    if (!silent) setLoading(true);
+    if (includeRevenue) revenueLoadAbortRef.current = controller;
+    if (includeMeal) mealLoadAbortRef.current = controller;
+    const revenueCurrent = () => includeRevenue && revenueSeq === revenueLoadSeqRef.current && !controller.signal.aborted;
+    const mealCurrent = () => includeMeal && mealSeq === mealLoadSeqRef.current && !controller.signal.aborted;
+    if (!silent) {
+      if (includeRevenue) setRevenueLoading(true);
+      if (includeMeal) setMealLoading(true);
+    }
     const selectedStoreOptions = {
       signal: controller.signal,
       revalidate: revalidate || (dateFrom <= beijingTodayYmd() && dateTo >= beijingTodayYmd()),
@@ -1909,6 +1926,12 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       granularity,
       includeCurrent,
     };
+    function checkAccess<T>(request: Promise<T>): Promise<T> {
+      return request.catch(error => {
+        if ((revenueCurrent() || mealCurrent()) && isPermissionError(error)) denyAccess();
+        throw error;
+      });
+    }
     const trendRequests = !includeRevenue ? [] : trendMode === "source_compare"
       ? [
           getRevenueTrend(dateFrom, dateTo, "ALL", "shop", revenueOptions),
@@ -1916,7 +1939,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         ]
       : [getRevenueTrend(dateFrom, dateTo, "ALL", "all", revenueOptions)];
     const trendRequest = includeRevenue
-      ? Promise.allSettled(trendRequests)
+      ? Promise.allSettled(trendRequests.map(checkAccess))
       : Promise.resolve([] as PromiseSettledResult<RevenueTrendResult>[]);
     const mealRequest = includeMeal
       ? getMealPeriods("ALL", dateTo, {
@@ -1939,14 +1962,74 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
           selectedStoreOptions,
         )
       : Promise.resolve(null);
+    const visibleTrendRequest = trendRequest.then(trendResults => {
+      if (!revenueCurrent() || accessRevokedRef.current) return trendResults;
+      if (trendResults.some(result => result.status === "rejected" && isPermissionError(result.reason))) {
+        denyAccess();
+        return trendResults;
+      }
+      const displayBase = {
+        trendMode,
+        granularity,
+        includeCurrent,
+        dateFrom,
+        dateTo,
+        scopeKeys: [...scopeKeys],
+        scopes: [...scopes],
+        shopKeys: [...shopKeys],
+        compareStores,
+        storeLabel,
+        emptyScope: false,
+      };
+      if (trendMode === "source_compare") {
+        const shopTrend = trendResults[0]?.status === "fulfilled" ? trendResults[0].value : null;
+        const takeoutTrend = trendResults[1]?.status === "fulfilled" ? trendResults[1].value : null;
+        if (shopTrend || takeoutTrend) {
+          setRevenueDisplay(previous => {
+            const preservePrevious = silent && previous?.trendMode === trendMode
+              && previous.granularity === granularity && previous.includeCurrent === includeCurrent
+              && previous.dateFrom === dateFrom && previous.dateTo === dateTo
+              && previous.scopeKeys.join(",") === scopeKeys.join(",")
+              && previous.shopKeys.join(",") === shopKeys.join(",");
+            const shop = revenueSourceData(shopTrend, previous ? { points: previous.shopTrendPoints, moving_averages: previous.shopMovingAverages, store_trends: previous.shopStoreTrends } : undefined, preservePrevious);
+            const takeout = revenueSourceData(takeoutTrend, previous ? { points: previous.takeoutTrendPoints, moving_averages: previous.takeoutMovingAverages, store_trends: previous.takeoutStoreTrends } : undefined, preservePrevious);
+            return {
+              ...displayBase,
+              trendPoints: [], movingAverages: [], storeTrends: {},
+              shopTrendPoints: shop.points,
+              shopMovingAverages: shop.moving_averages,
+              shopStoreTrends: shop.store_trends,
+              takeoutTrendPoints: takeout.points,
+              takeoutMovingAverages: takeout.moving_averages,
+              takeoutStoreTrends: takeout.store_trends,
+            };
+          });
+        }
+      } else if (trendResults[0]?.status === "fulfilled") {
+        const trend = trendResults[0].value;
+        setRevenueDisplay({
+          ...displayBase,
+          trendPoints: trend.points,
+          movingAverages: trend.moving_averages || [],
+          storeTrends: trend.store_trends || {},
+          shopTrendPoints: [],
+          shopMovingAverages: [],
+          shopStoreTrends: {},
+          takeoutTrendPoints: [],
+          takeoutMovingAverages: [],
+          takeoutStoreTrends: {},
+        });
+      }
+      return trendResults;
+    });
     return Promise.allSettled([
-      trendRequest,
-      mealRequest,
-      mealTrendRequest,
-      turnoverRequest,
+      visibleTrendRequest,
+      checkAccess(mealRequest),
+      checkAccess(mealTrendRequest),
+      checkAccess(turnoverRequest),
     ])
       .then(([trendGroupResult, mealResult, mealTrendResult, turnoverResult]) => {
-        if (seq !== loadSeqRef.current || controller.signal.aborted) return;
+        if (!revenueCurrent() && !mealCurrent()) return;
         const results = [
           ...(includeRevenue
             ? (trendGroupResult.status === "fulfilled" ? trendGroupResult.value : [trendGroupResult])
@@ -1957,68 +2040,13 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
           denyAccess();
           return false;
         }
-        const displayBase = {
-          trendMode,
-          granularity,
-          includeCurrent,
-          dateFrom,
-          dateTo,
-          scopeKeys: [...scopeKeys],
-          scopes: [...scopes],
-          shopKeys: [...shopKeys],
-          compareStores,
-          storeLabel,
-          emptyScope: false,
-        };
-        const trendResults = includeRevenue && trendGroupResult.status === "fulfilled"
-          ? trendGroupResult.value
-          : [];
-        if (trendMode === "source_compare") {
-          const shopTrend = trendResults[0]?.status === "fulfilled" ? trendResults[0].value : null;
-          const takeoutTrend = trendResults[1]?.status === "fulfilled" ? trendResults[1].value : null;
-          if (shopTrend || takeoutTrend) {
-            setRevenueDisplay(previous => {
-              const preservePrevious = silent && previous?.trendMode === trendMode
-                && previous.granularity === granularity && previous.includeCurrent === includeCurrent
-                && previous.dateFrom === dateFrom && previous.dateTo === dateTo
-                && previous.scopeKeys.join(",") === scopeKeys.join(",")
-                && previous.shopKeys.join(",") === shopKeys.join(",");
-              const shop = revenueSourceData(shopTrend, previous ? { points: previous.shopTrendPoints, moving_averages: previous.shopMovingAverages, store_trends: previous.shopStoreTrends } : undefined, preservePrevious);
-              const takeout = revenueSourceData(takeoutTrend, previous ? { points: previous.takeoutTrendPoints, moving_averages: previous.takeoutMovingAverages, store_trends: previous.takeoutStoreTrends } : undefined, preservePrevious);
-              return {
-                ...displayBase,
-                trendPoints: [], movingAverages: [], storeTrends: {},
-                shopTrendPoints: shop.points,
-                shopMovingAverages: shop.moving_averages,
-                shopStoreTrends: shop.store_trends,
-                takeoutTrendPoints: takeout.points,
-                takeoutMovingAverages: takeout.moving_averages,
-                takeoutStoreTrends: takeout.store_trends,
-              };
-            });
-          }
-        } else if (trendResults[0]?.status === "fulfilled") {
-          const trend = trendResults[0].value;
-          setRevenueDisplay({
-            ...displayBase,
-            trendPoints: trend.points,
-            movingAverages: trend.moving_averages || [],
-            storeTrends: trend.store_trends || {},
-            shopTrendPoints: [],
-            shopMovingAverages: [],
-            shopStoreTrends: {},
-            takeoutTrendPoints: [],
-            takeoutMovingAverages: [],
-            takeoutStoreTrends: {},
-          });
-        }
         const mealTrend = mealTrendResult.status === "fulfilled" ? mealTrendResult.value : null;
         const selectedMealPoints = mealTrend
           ? selectMealStorePoints(mealTrend.points, mealTrend.store_trends || {}, shopKeys)
           : [];
         const selectedDayPoint = selectedMealPoints.find(point => point.date === dateTo);
         const mealPeriods = mealResult.status === "fulfilled" ? mealResult.value?.periods : undefined;
-        if (includeMeal && (mealPeriods || mealTrend)) {
+        if (mealCurrent() && (mealPeriods || mealTrend)) {
           setSelectedMealDate(dateTo);
           setMealRows((shopKeys.length === 0 && mealPeriods?.length)
             ? mealPeriods
@@ -2026,11 +2054,11 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
             ? MEAL_PERIOD_SERIES.map(([key]) => selectedDayPoint[key])
             : []);
         }
-        if (includeMeal && mealTrend) {
+        if (mealCurrent() && mealTrend) {
           setMealTrendPoints(mealTrend.points.length > 0 ? mealTrend.points : []);
           setMealStoreTrends(mealTrend.store_trends || {});
         }
-        if (includeMeal && turnoverResult.status === "fulfilled") setMealTurnover(turnoverResult.value);
+        if (mealCurrent() && turnoverResult.status === "fulfilled") setMealTurnover(turnoverResult.value);
 
         results.forEach(result => {
           if (result.status !== "rejected") return;
@@ -2043,10 +2071,10 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       })
       .finally(() => {
         releaseAbort();
-        if (loadAbortRef.current === controller) loadAbortRef.current = null;
-        if (seq === loadSeqRef.current) {
-          setLoading(false);
-        }
+        if (revenueLoadAbortRef.current === controller) revenueLoadAbortRef.current = null;
+        if (mealLoadAbortRef.current === controller) mealLoadAbortRef.current = null;
+        if (includeRevenue && revenueSeq === revenueLoadSeqRef.current) setRevenueLoading(false);
+        if (includeMeal && mealSeq === mealLoadSeqRef.current) setMealLoading(false);
       });
   };
 
@@ -2215,14 +2243,20 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     ));
   }, [dateFrom, dateTo, granularity, historyDateFrom, includeCurrent, mealFactMode, mealFacts, selectedMealDate, shopKeys, storeLabels]);
 
+  const needsRevenueFallback = orderFactMode === "fallback";
+  const needsMealFallback = mealFactMode === "fallback";
   useEffect(() => {
-    if (orderFactMode === "loading" || mealFactMode === "loading") return undefined;
-    load(false, orderFactMode !== "ready", mealFactMode !== "ready");
-    return () => {
-      loadAbortRef.current?.abort('sddsd loadMealDay abort');
-    };
+    if (!needsRevenueFallback) return undefined;
+    load(false, true, false);
+    return () => { revenueLoadAbortRef.current?.abort(); };
     /* eslint-disable-next-line */
-  }, [dateFrom, dateTo, trendMode, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(','), compareStores, orderFactMode, mealFactMode]);
+  }, [dateFrom, dateTo, trendMode, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(','), compareStores, needsRevenueFallback]);
+  useEffect(() => {
+    if (!needsMealFallback) return undefined;
+    load(false, false, true);
+    return () => { mealLoadAbortRef.current?.abort(); };
+    /* eslint-disable-next-line */
+  }, [dateFrom, dateTo, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(','), needsMealFallback]);
   useEffect(() => {
     if (selectedDetailPeriod && detailPeriodKey !== selectedDetailPeriod.key) {
       setDetailPeriodKey(selectedDetailPeriod.key);
@@ -2238,6 +2272,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const today = beijingTodayYmd();
   const realtimeRange = (granularity === "day" || includeCurrent)
     && (relativeRangeRef.current !== null || (dateFrom <= today && dateTo >= today));
+  const pollingInterval = !permissionDenied && realtimeRange && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 300000 : null;
   usePolling(async signal => {
     const nextToday = beijingTodayYmd();
     if (relativeRangeRef.current && rangeDayRef.current !== nextToday) {
@@ -2247,44 +2282,59 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         : { ...current, dateTo: nextToday });
       return;
     }
-    if (loading || detailLoading || orderFactMode === "loading" || mealFactMode === "loading") return;
-    const refreshOrderFacts = async () => {
-      if (orderFactMode !== "ready") return true;
-      const records = await getOrderDailyFacts<OrderDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
-      if (signal.aborted || accessRevokedRef.current) return false;
-      const versions = dailyFactVersions(records);
-      if (versions !== orderFactVersionsRef.current) {
-        orderFactVersionsRef.current = versions;
-        setOrderFacts(records.map(dashboardOrderFactFromRecord));
+    if (revenueLoading || orderFactMode === "loading") return;
+    try {
+      if (orderFactMode === "ready") {
+        const records = await getOrderDailyFacts<OrderDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
+        if (signal.aborted || accessRevokedRef.current) return;
+        const versions = dailyFactVersions(records);
+        if (versions !== orderFactVersionsRef.current) {
+          orderFactVersionsRef.current = versions;
+          setOrderFacts(records.map(dashboardOrderFactFromRecord));
+        }
+        setRevenueRefreshFailed(false);
+      } else {
+        const refreshed = await load(true, true, false, signal, true);
+        if (!signal.aborted && !accessRevokedRef.current) setRevenueRefreshFailed(refreshed === false);
       }
-      return true;
-    };
-    const refreshMealFacts = async () => {
-      if (mealFactMode !== "ready") return true;
-      const records = await getMealDailyFacts<MealDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
-      if (signal.aborted || accessRevokedRef.current) return false;
-      const versions = dailyFactVersions(records);
-      if (versions !== mealFactVersionsRef.current) {
-        mealFactVersionsRef.current = versions;
-        setMealFacts(records.map(dashboardMealFactFromRecord));
-      }
-      return true;
-    };
-    const results = await Promise.allSettled([
-      refreshOrderFacts(), refreshMealFacts(),
-      orderFactMode !== "ready" || mealFactMode !== "ready"
-        ? load(true, orderFactMode !== "ready", mealFactMode !== "ready", signal, true)
-        : Promise.resolve(true),
-      loadComparison(true, signal),
-    ]);
-    if (signal.aborted || accessRevokedRef.current) return;
-    if (results.some(result => result.status === "rejected" && isPermissionError(result.reason))) {
-      denyAccess();
-      return;
+    } catch (error) {
+      if (signal.aborted || accessRevokedRef.current) return;
+      if (isPermissionError(error)) { denyAccess(); return; }
+      setRevenueRefreshFailed(true);
     }
-    setRefreshFailed(results.some(result => result.status === "rejected" || result.value === false));
-  }, !permissionDenied && realtimeRange && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 300000 : null,
-  [dateFrom, dateTo, granularity, includeCurrent, trendMode, comparisonMode, selectedDetailPeriod?.key, scopeKeys.join(','), shopKeys.join(',')]);
+  }, pollingInterval,
+  [dateFrom, dateTo, granularity, includeCurrent, trendMode, scopeKeys.join(','), shopKeys.join(',')]);
+  usePolling(async signal => {
+    if (mealLoading || mealFactMode === "loading") return;
+    if (relativeRangeRef.current && dateTo !== beijingTodayYmd()) return;
+    try {
+      if (mealFactMode === "ready") {
+        const records = await getMealDailyFacts<MealDailyFact>(historyDateFrom, dateTo, {}, { signal, forceRefresh: false });
+        if (signal.aborted || accessRevokedRef.current) return;
+        const versions = dailyFactVersions(records);
+        if (versions !== mealFactVersionsRef.current) {
+          mealFactVersionsRef.current = versions;
+          setMealFacts(records.map(dashboardMealFactFromRecord));
+        }
+        setMealRefreshFailed(false);
+      } else {
+        const refreshed = await load(true, false, true, signal, true);
+        if (!signal.aborted && !accessRevokedRef.current) setMealRefreshFailed(refreshed === false);
+      }
+    } catch (error) {
+      if (signal.aborted || accessRevokedRef.current) return;
+      if (isPermissionError(error)) { denyAccess(); return; }
+      setMealRefreshFailed(true);
+    }
+  }, pollingInterval,
+  [dateFrom, dateTo, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(',')]);
+  usePolling(async signal => {
+    if (detailLoading) return;
+    if (relativeRangeRef.current && dateTo !== beijingTodayYmd()) return;
+    const refreshed = await loadComparison(true, signal);
+    if (!signal.aborted && !accessRevokedRef.current) setOverviewRefreshFailed(refreshed === false);
+  }, pollingInterval,
+  [dateFrom, dateTo, granularity, includeCurrent, comparisonMode, selectedDetailPeriod?.key, scopeKeys.join(','), shopKeys.join(',')]);
   useEffect(() => {
     const point = activeMealTrendPoints.find(item => item.date === selectedMealDate);
     if (point) setMealRows(MEAL_PERIOD_SERIES.map(([key]) => point[key]));
@@ -2326,11 +2376,8 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     if (mealFactMode === "ready") {
       setMealFactRefreshSeq(value => value + 1);
     }
-    if (orderFactMode === "ready" || mealFactMode === "ready") {
-      load(true, orderFactMode !== "ready", mealFactMode !== "ready");
-    } else {
-      load(true, true, true);
-    }
+    if (orderFactMode !== "ready") load(true, true, false);
+    if (mealFactMode !== "ready") load(true, false, true);
     loadComparison();
   };
   const openFullscreen = (chart: "revenue" | "meal") => {
@@ -2645,7 +2692,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
                 onFullscreen={() => openFullscreen("revenue")}
                 legendSelectionRef={revenueLegendSelectionRef}
               />
-              {loading ? (
+              {revenueLoading ? (
                 <div
                   aria-label="趋势数据更新中"
                   className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-white/50 text-sm text-slate-500"
@@ -2654,7 +2701,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
                 </div>
               ) : null}
             </div>
-          ) : loading ? (
+          ) : revenueLoading ? (
             <div className="flex h-[18rem] items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400 md:h-[22rem]">
               加载中…
             </div>
@@ -2684,7 +2731,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
             options={MEAL_METRIC_OPTIONS}
           />
         </div>
-        {loading ? (
+        {mealLoading ? (
           <div className="py-8 text-center text-sm text-slate-400">加载中…</div>
         ) : mealMetricMode === "turnover" ? (
           activeMealTurnover?.data_status === "ok" ? (
@@ -2864,7 +2911,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
                 fullscreen
                 legendSelectionRef={revenueLegendSelectionRef}
               />
-              {loading ? (
+              {revenueLoading ? (
                 <div
                   aria-label="全屏趋势数据更新中"
                   className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-white/50 text-sm text-slate-500"
@@ -2873,7 +2920,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
                 </div>
               ) : null}
             </div>
-          ) : loading ? (
+          ) : revenueLoading ? (
             <div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">
               加载中...
             </div>
@@ -2943,7 +2990,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
                 fullscreen
                 legendSelectionRef={mealLegendSelectionRef}
               />
-            ) : loading ? (
+            ) : mealLoading ? (
               <div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">
                 加载中...
               </div>
@@ -2963,7 +3010,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
               fullscreen
               legendSelectionRef={mealLegendSelectionRef}
             />
-          ) : loading ? (
+          ) : mealLoading ? (
             <div className="flex h-full items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400">
               加载中...
             </div>

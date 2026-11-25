@@ -258,7 +258,7 @@ describe('dynamic trend chart series', () => {
     expect(formatLaborPeriodLabel('2026-07', 'month')).toBe('2026-07');
     expect(formatProductTrendTooltip([{ dataIndex: 0, seriesName: '销量', value: 10 }], [{
       period: '2026-W29', quantity: 10, sales_amount: 100, order_count: 5, missing: false, in_progress: true,
-    }])).toContain('进行中，截至昨日');
+    }])).toContain('进行中');
     expect(formatLaborTrendTooltip([{ dataIndex: 0, seriesName: '实际工时', value: null }], [{
       period: '2026-W29', net_revenue: 0, actual_hours: 0, planned_hours: 0,
       actual_revenue_per_hour: 0, planned_revenue_per_hour: 0, headcount: 0, missing: true,
@@ -266,6 +266,6 @@ describe('dynamic trend chart series', () => {
     expect(formatProductTrendTooltip([{ dataIndex: 0, seriesName: '销量', value: 10 }], [{
       period: '2026-W29', quantity: 10, sales_amount: 100, order_count: 5,
       missing: true, in_progress: true,
-    }])).toContain('进行中，截至昨日 · 数据不完整');
+    }])).toContain('进行中 · 数据不完整');
   });
 });

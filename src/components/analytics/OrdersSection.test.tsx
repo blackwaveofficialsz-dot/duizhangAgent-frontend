@@ -289,12 +289,16 @@ describe('OrdersSection timer lifecycle', () => {
   });
 
   it('shows canonical partial completeness from operations overview', async () => {
+    vi.setSystemTime(new Date('2026-07-31T04:00:00Z'));
     operationsApi.fetchOperationsOverview.mockResolvedValue(overviewResponse({
       status: 'partial',
       stores: [],
     }));
 
     render(<OrdersSection show={vi.fn()} canManage={false} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    fireEvent.click(screen.getByRole('button', { name: '◀' }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(screen.getByText('已发现快照不完整，等待后台修复')).toBeTruthy();

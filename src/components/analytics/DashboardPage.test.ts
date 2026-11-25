@@ -531,6 +531,76 @@ describe('DashboardPage realtime refresh', () => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
   });
 
+  it('publishes revenue while an independent meal request is still pending', async () => {
+    analyticsApi.getRevenueTrend.mockResolvedValue({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] });
+    analyticsApi.getMealPeriods.mockReturnValue(new Promise(() => {}));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByRole('img', { name: '净实收趋势主图' })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByLabelText('趋势数据更新中')).toBeNull());
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows completed meal cards while revenue is still pending', async () => {
+    analyticsApi.getRevenueTrend.mockReturnValue(new Promise(() => {}));
+    analyticsApi.getMealPeriods.mockResolvedValue({ periods: [{ period_key: 'breakfast', period_label: '早餐', order_count: 10, paid_amount: 100, income_amount: 80, refund_amount: 0, net_income: 80, avg_order_value: 10 }] });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText('06:00-10:00')).toBeTruthy();
+    expect(analyticsApi.getMealPeriods).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps revenue and overview refreshing when a meal refresh remains pending across two ticks', async () => {
+    analyticsApi.getRevenueTrend.mockResolvedValue({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByRole('img', { name: '净实收趋势主图' });
+    await waitFor(() => expect((within(screen.getByTestId('dashboard-desktop-controls')).getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false));
+    analyticsApi.getMealPeriods.mockReturnValueOnce(new Promise(() => {}));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(2);
+    expect(analyticsApi.getMealPeriods).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(3);
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenCalledTimes(3);
+    expect(analyticsApi.getMealPeriods).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts the revenue fallback without waiting for meal daily facts', async () => {
+    dailyFactsApi.getMealDailyFacts.mockReturnValue(new Promise(() => {}));
+    analyticsApi.getRevenueTrend.mockResolvedValue({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByRole('img', { name: '净实收趋势主图' })).toBeTruthy();
+  });
+
+  it('does not restart an in-flight revenue request when meal facts fall back later', async () => {
+    let failMealFacts!: (reason: Error) => void;
+    dailyFactsApi.getMealDailyFacts.mockReturnValue(new Promise((_, reject) => { failMealFacts = reject; }));
+    const revenue = deferred<unknown>();
+    analyticsApi.getRevenueTrend.mockReturnValue(revenue.promise);
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(1));
+    const signal = analyticsApi.getRevenueTrend.mock.calls[0][4].signal as AbortSignal;
+    await act(async () => { failMealFacts(new Error('unsupported')); });
+    await waitFor(() => expect(analyticsApi.getMealPeriods).toHaveBeenCalledTimes(1));
+    expect(signal.aborted).toBe(false);
+    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(1);
+    await act(async () => revenue.resolve({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] }));
+    expect(await screen.findByRole('img', { name: '净实收趋势主图' })).toBeTruthy();
+  });
+
+  it('requests summary cards without unnecessary order breakdowns', async () => {
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ orderBreakdown: 'none' }) }));
+  });
+
+  it('revokes independent revenue immediately when a meal request returns 403 while another hangs', async () => {
+    analyticsApi.getRevenueTrend.mockResolvedValue({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] });
+    analyticsApi.getMealPeriods.mockReturnValue(new Promise(() => {}));
+    analyticsApi.getMealPeriodTrend.mockRejectedValue(Object.assign(new Error('denied'), { status: 403 }));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    expect(await screen.findByText('无权访问经营数据')).toBeTruthy();
+    expect(screen.queryByRole('img', { name: '净实收趋势主图' })).toBeNull();
+  });
+
   it('reads the newest server data every five minutes while retaining the visible cards', async () => {
     const { unmount } = render(createElement(DashboardPage, { show: vi.fn() }));
     await screen.findByText('¥1,000.00');
