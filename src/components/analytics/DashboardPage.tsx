@@ -1824,7 +1824,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         dateTo: selectedDetailPeriod.dateTo,
         compare: comparisonMode,
         includeCurrent,
-        orderBreakdown: "none",
+        orderBreakdown: trendMode === "source_compare" ? "channel" : "none",
       },
       signal: controller.signal,
       refresh: false,
@@ -1853,7 +1853,6 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   };
 
   const load = (
-    revalidate = false,
     includeRevenue = orderFactMode !== "ready",
     includeMeal = mealFactMode !== "ready",
     signal?: AbortSignal,
@@ -1910,7 +1909,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     }
     const selectedStoreOptions = {
       signal: controller.signal,
-      revalidate: revalidate || (dateFrom <= beijingTodayYmd() && dateTo >= beijingTodayYmd()),
+      revalidate: true,
       forceRefresh: false,
       storeKeys: scopeKeys.includes("ALL") ? undefined : shopKeys,
     };
@@ -2241,18 +2240,18 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const needsMealFallback = mealFactMode === "fallback";
   useEffect(() => {
     if (!needsRevenueFallback) return undefined;
-    load(false, true, false);
+    load(true, false);
     return () => { revenueLoadAbortRef.current?.abort(); };
     /* eslint-disable-next-line */
   }, [dateFrom, dateTo, trendMode, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(','), compareStores, needsRevenueFallback]);
   useEffect(() => {
     if (!needsMealFallback) return undefined;
-    load(false, false, true);
+    load(false, true);
     return () => { mealLoadAbortRef.current?.abort(); };
     /* eslint-disable-next-line */
   }, [dateFrom, dateTo, granularity, includeCurrent, scopeKeys.join(','), shopKeys.join(','), needsMealFallback]);
   useEffect(() => {
-    if (selectedDetailPeriod && detailPeriodKey !== selectedDetailPeriod.key) {
+    if (detailPeriodKey && selectedDetailPeriod && detailPeriodKey !== selectedDetailPeriod.key) {
       setDetailPeriodKey(selectedDetailPeriod.key);
     }
   }, [detailPeriodKey, selectedDetailPeriod]);
@@ -2262,7 +2261,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
       detailLoadAbortRef.current?.abort('dashboard detail effect cleanup');
     };
     /* eslint-disable-next-line */
-  }, [selectedDetailPeriod?.dateFrom, selectedDetailPeriod?.dateTo, granularity, includeCurrent, comparisonMode, scopeKeys.join(','), shopKeys.join(',')]);
+  }, [selectedDetailPeriod?.dateFrom, selectedDetailPeriod?.dateTo, granularity, includeCurrent, comparisonMode, trendMode, scopeKeys.join(','), shopKeys.join(',')]);
   const today = beijingTodayYmd();
   const realtimeRange = (granularity === "day" || includeCurrent)
     && (relativeRangeRef.current !== null || (dateFrom <= today && dateTo >= today));
@@ -2288,7 +2287,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         }
         setRevenueRefreshFailed(false);
       } else {
-        const refreshed = await load(true, true, false, signal, true);
+        const refreshed = await load(true, false, signal, true);
         if (!signal.aborted && !accessRevokedRef.current) setRevenueRefreshFailed(refreshed === false);
       }
     } catch (error) {
@@ -2312,7 +2311,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
         }
         setMealRefreshFailed(false);
       } else {
-        const refreshed = await load(true, false, true, signal, true);
+        const refreshed = await load(false, true, signal, true);
         if (!signal.aborted && !accessRevokedRef.current) setMealRefreshFailed(refreshed === false);
       }
     } catch (error) {
@@ -2328,7 +2327,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     const refreshed = await loadComparison(true, signal);
     if (!signal.aborted && !accessRevokedRef.current) setOverviewRefreshFailed(refreshed === false);
   }, pollingInterval,
-  [dateFrom, dateTo, granularity, includeCurrent, comparisonMode, selectedDetailPeriod?.key, scopeKeys.join(','), shopKeys.join(',')]);
+  [dateFrom, dateTo, granularity, includeCurrent, comparisonMode, trendMode, selectedDetailPeriod?.key, scopeKeys.join(','), shopKeys.join(',')]);
   useEffect(() => {
     const point = activeMealTrendPoints.find(item => item.date === selectedMealDate);
     if (point) setMealRows(MEAL_PERIOD_SERIES.map(([key]) => point[key]));
@@ -2370,8 +2369,8 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
     if (mealFactMode === "ready") {
       setMealFactRefreshSeq(value => value + 1);
     }
-    if (orderFactMode !== "ready") load(true, true, false);
-    if (mealFactMode !== "ready") load(true, false, true);
+    if (orderFactMode !== "ready") load(true, false);
+    if (mealFactMode !== "ready") load(false, true);
     loadComparison();
   };
   const openFullscreen = (chart: "revenue" | "meal") => {

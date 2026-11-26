@@ -677,6 +677,40 @@ describe('DashboardPage realtime refresh', () => {
     expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ orderBreakdown: 'none' }) }));
   });
 
+  it('loads channel breakdowns for source comparison and returns to summary-only reads', async () => {
+    const base = await defaultOverviewRequest();
+    operationsApi.fetchOperationsOverview.mockImplementation(async ({ filters }) => ({ ...base, channels: filters.orderBreakdown === 'channel' ? base.channels : [] }));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    const sourceButtons = screen.getAllByText('堂食/外卖');
+    fireEvent.click(sourceButtons[sourceButtons.length - 1]);
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ orderBreakdown: 'channel' }) })));
+    expect(within(screen.getByRole('region', { name: '堂食经营统计' })).getByText('¥600.00')).toBeTruthy();
+    const allButtons = screen.getAllByText('全部趋势');
+    fireEvent.click(allButtons[allButtons.length - 1]);
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ orderBreakdown: 'none' }) })));
+  });
+
+  it('moves the default statistics period to the latest day at Beijing midnight', async () => {
+    vi.setSystemTime(new Date('2026-08-12T15:58:00Z'));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateTo: '2026-08-12' }) })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateFrom: '2026-08-13', dateTo: '2026-08-13' }) })));
+  });
+
+  it('preserves an explicitly selected historical statistics period across midnight', async () => {
+    vi.setSystemTime(new Date('2026-08-12T15:58:00Z'));
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    fireEvent.mouseDown(screen.getByLabelText('经营看板卡片周期'));
+    const options = await screen.findAllByText('2026-08-10');
+    fireEvent.click(options[options.length - 1]);
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateTo: '2026-08-10' }) })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
+    expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateFrom: '2026-08-10', dateTo: '2026-08-10' }) }));
+  });
+
   it('revokes independent revenue immediately when a meal request returns 403 while another hangs', async () => {
     analyticsApi.getRevenueTrend.mockResolvedValue({ points: [{ period: '2026-08-12', net_income: 123, order_count: 3, missing: false }], moving_averages: [] });
     analyticsApi.getMealPeriods.mockReturnValue(new Promise(() => {}));
