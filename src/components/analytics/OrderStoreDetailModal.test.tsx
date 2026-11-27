@@ -200,7 +200,7 @@ describe('OrderStoreDetailModal', () => {
     await waitFor(() => expect(dailyFactsApi.getOrderDailyFacts).toHaveBeenCalledWith(
       '2026-02-05',
       '2026-08-12',
-      {},
+      { store_keys: ['A'] },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     expect((await screen.findByTestId('order-store-trend-chart')).getAttribute('data-points')).toBe('10');

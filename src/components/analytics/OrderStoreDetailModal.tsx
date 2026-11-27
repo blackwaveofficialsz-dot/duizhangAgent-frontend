@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Segmented, Table, type TableColumnsType } from 'antd';
 import dayjs from 'dayjs';
 
-import { getOrderDailyFacts } from '../../api/analyticsDailyFacts';
-import type { DailyFactRecord, OrderDailyFact } from '../../api/analyticsDailyTypes';
+import { getOrderDetailFacts } from '../../api/orderDetailFacts';
+import type { OrderDailyFact } from '../../api/analyticsDailyTypes';
 import type { ComparisonMode } from '../../features/operations-analysis/api/client';
 import type { MetricComparison } from '../../features/operations-analysis/api/client';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { usePolling } from '../../hooks/usePolling';
 import { TableDisplayFrame, type TableDisplayCell } from '../TableDisplayFrame';
 import { aggregateOrderFacts, buildRevenueSeries, filterOrderFactsByStores } from './dailyFactSelectors';
 import { OrderStoreTrendChart } from './OrderStoreTrendChart';
@@ -26,7 +27,7 @@ import {
   type ComparisonValueFormat,
 } from './PeriodComparison';
 import { TrendPeriodControls } from './TrendPeriodControls';
-import { defaultTrendRange, trendHistoryStart, type TrendGranularity } from './trendPeriod';
+import { defaultTrendRange, trendHistoryStart, type TrendGranularity, type TrendRange } from './trendPeriod';
 
 type StoreRef = { storeKey: string; storeLabel: string };
 type ViewMode = 'chart' | 'detail';
@@ -79,6 +80,7 @@ export function OrderStoreDetailModal({
   open,
   store,
   initialGranularity,
+  initialRange: parentRange,
   secondaryDimension,
   breakdowns = [],
   seedFacts,
@@ -89,6 +91,7 @@ export function OrderStoreDetailModal({
   open: boolean;
   store: StoreRef | null;
   initialGranularity: TrendGranularity;
+  initialRange?: TrendRange;
   secondaryDimension: OrderSecondaryDimension;
   breakdowns?: Array<{ key: string; label: string }>;
   seedFacts: OrderDailyFact[];
@@ -100,7 +103,7 @@ export function OrderStoreDetailModal({
   const today = todayYmd || new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
-  const initialRange = defaultTrendRange(initialGranularity, today, true);
+  const initialRange = parentRange ?? defaultTrendRange(initialGranularity, today, true);
   const [granularity, setGranularity] = useState<TrendGranularity>(initialGranularity);
   const [dateFrom, setDateFrom] = useState(initialRange.dateFrom);
   const [dateTo, setDateTo] = useState(initialRange.dateTo);
@@ -123,31 +126,36 @@ export function OrderStoreDetailModal({
 
   useEffect(() => {
     if (!open) return;
-    const range = defaultTrendRange(initialGranularity, today, true);
+    const range = parentRange ?? defaultTrendRange(initialGranularity, today, true);
     setGranularity(initialGranularity);
     setDateFrom(range.dateFrom);
     setDateTo(range.dateTo);
     setIncludeCurrent(range.includeCurrent);
     setView('chart');
     requestedRangeRef.current = '';
-  }, [open, store?.storeKey, initialGranularity, today]);
+  }, [open, store?.storeKey, initialGranularity, today, parentRange?.dateFrom, parentRange?.dateTo, parentRange?.includeCurrent]);
 
-  useEffect(() => {
-    if (!open || !store || accessRevokedRef.current) return;
+  const readFacts = async (signal?: AbortSignal, revalidate = false) => {
+    if (!open || !store || accessRevokedRef.current || document.hidden || (revalidate && requestRef.current)) return;
     const [previousFrom] = previousRange(dateFrom, dateTo);
     const historyFrom = trendHistoryStart(granularity, dateFrom);
     const fetchFrom = historyFrom < previousFrom ? historyFrom : previousFrom;
     const requestKey = `${store.storeKey}|${fetchFrom}|${dateTo}`;
-    if (hasDateCoverage(sessionFacts, fetchFrom, dateTo) || requestedRangeRef.current === requestKey) return;
+    const scopedFacts = sessionFacts.filter(fact => Object.entries(fact.stores || {})
+      .some(([key, value]) => key === store.storeKey || value.store_key === store.storeKey));
+    if (!revalidate && (hasDateCoverage(scopedFacts, fetchFrom, dateTo) || requestedRangeRef.current === requestKey)) return;
     requestedRangeRef.current = requestKey;
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
-    getOrderDailyFacts<OrderDailyFact>(fetchFrom, dateTo, {}, { signal: controller.signal })
-      .then((records: DailyFactRecord<OrderDailyFact>[]) => {
-        if (!controller.signal.aborted) setSessionFacts(current => mergeFacts(current, records.map(record => record.payload)));
-      })
-      .catch(error => {
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    try {
+      const facts = await getOrderDetailFacts(fetchFrom, dateTo, store.storeKey, secondaryDimension, controller.signal);
+      if (!controller.signal.aborted) setSessionFacts(current => mergeFacts(
+        revalidate ? current.filter(fact => fact.date < fetchFrom || fact.date > dateTo) : current, facts));
+    } catch (error) {
         if (controller.signal.aborted) return;
         if (typeof error === 'object' && error !== null && 'status' in error
           && (error.status === 401 || error.status === 403)) {
@@ -158,14 +166,29 @@ export function OrderStoreDetailModal({
           setPermissionDenied(true);
           permissionCallbackRef.current?.();
         }
-      });
-    return () => controller.abort();
-  }, [open, store?.storeKey, granularity, dateFrom, dateTo, sessionFacts]);
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      if (requestRef.current === controller) requestRef.current = null;
+    }
+  };
+  useEffect(() => {
+    void readFacts();
+    return () => { requestRef.current?.abort(); requestRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, store?.storeKey, granularity, dateFrom, dateTo, secondaryDimension]);
+  usePolling(signal => readFacts(signal, true), open && store && !permissionDenied ? 300000 : null,
+    [store?.storeKey, granularity, dateFrom, dateTo, secondaryDimension]);
 
-  useEffect(() => () => requestRef.current?.abort(), []);
+  useEffect(() => {
+    const abortHidden = () => {
+      if (document.hidden) { requestRef.current?.abort(); requestRef.current = null; }
+    };
+    document.addEventListener('visibilitychange', abortHidden);
+    return () => { document.removeEventListener('visibilitychange', abortHidden); requestRef.current?.abort(); };
+  }, []);
 
   const storeFacts = useMemo(() => store
-    ? filterOrderFactsByStores(sessionFacts, { storeKeys: [store.storeKey] })
+    ? filterOrderFactsByStores(sessionFacts, { storeKeys: [store.storeKey] }).filter(fact => Object.keys(fact.stores).length > 0)
     : [], [sessionFacts, store]);
   const visibleFacts = useMemo(() => storeFacts.filter(fact => fact.date >= dateFrom && fact.date <= dateTo), [storeFacts, dateFrom, dateTo]);
   const historyFrom = useMemo(() => trendHistoryStart(granularity, dateFrom), [dateFrom, granularity]);

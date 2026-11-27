@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({ getBusinessReport: vi.fn(), getOrders: vi.fn(), getOrdersInsight: vi.fn(), listPlatformDim: vi.fn(), saveOrdersInsightCandidate: vi.fn() }));
@@ -116,7 +116,7 @@ describe('OrdersSection realtime orders', () => {
     expect(overviewApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateFrom: '2026-08-13', dateTo: '2026-08-13', includeCurrent: true }) }));
   });
 
-  it('does not poll a fixed historical date', async () => {
+  it('revalidates a fixed historical date every five minutes', async () => {
     render(<OrdersSection show={vi.fn()} canManage={false} />);
     await flush();
     fireEvent.click(screen.getByRole('button', { name: '◀' }));
@@ -124,7 +124,27 @@ describe('OrdersSection realtime orders', () => {
     expect(overviewApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateTo: '2026-08-11', includeCurrent: false }) }));
     const calls = overviewApi.fetchOperationsOverview.mock.calls.length;
     await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-    expect(overviewApi.fetchOperationsOverview).toHaveBeenCalledTimes(calls);
+    expect(overviewApi.fetchOperationsOverview).toHaveBeenCalledTimes(calls + 2);
+    expect(overviewApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ dateTo: '2026-08-11' }), refresh: false }));
+  });
+
+  it('passes the selected historical dates into a store detail', async () => {
+    render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
+    fireEvent.click(screen.getByRole('button', { name: '◀' })); await flush();
+    fireEvent.click(screen.getAllByRole('button', { name: '实时测试店' })[0]); await flush();
+    const dates = within(screen.getByRole('dialog')).getAllByRole('textbox').map(input => (input as HTMLInputElement).value);
+    expect(dates.slice(0, 2)).toEqual(['2026-08-11', '2026-08-11']);
+  });
+
+  it('shows historical repair status and Beijing data time before the original KPI cards', async () => {
+    overviewApi.fetchOperationsOverview.mockResolvedValue({ ...overview(), freshness: {
+      mode: 'historical', provisional: true, status: 'repairing', snapshot_version: 'v1',
+      data_as_of: '2026-08-11T04:34:56Z', generated_at: '2026-08-12T12:00:00+08:00', refresh_interval_seconds: 300,
+    } });
+    render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
+    fireEvent.click(screen.getByRole('button', { name: '◀' })); await flush();
+    expect(screen.getByText(/历史数据核对中/).textContent).toContain('12:34:56');
+    expect(screen.getAllByText('¥50.00').length).toBeGreaterThan(0);
   });
 
   it('does not turn today partial coverage into a five-second repair loop', async () => {
@@ -168,7 +188,7 @@ describe('OrdersSection realtime orders', () => {
     await flush();
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     await flush();
-    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000); });
     expect(overviewApi.fetchOperationsOverview).toHaveBeenCalledTimes(3);
     await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
     expect(overviewApi.fetchOperationsOverview).toHaveBeenCalledTimes(3);

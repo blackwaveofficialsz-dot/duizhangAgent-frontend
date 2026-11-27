@@ -88,8 +88,8 @@ function ReceivedOrdersScope({ date, storeKeys }: Omit<Props, 'enabled'>) {
   usePolling(async signal => {
     const nextToday = currentBeijingDate();
     if (nextToday !== today) setToday(nextToday);
-    if (date === nextToday) await read(false, signal);
-  }, !denied && date === today ? 300000 : null);
+    await read(false, signal);
+  }, !denied ? 300000 : null);
 
   const availability = summary?.received_amount_availability;
   const amount = summary?.data?.received_verified_paid_net;

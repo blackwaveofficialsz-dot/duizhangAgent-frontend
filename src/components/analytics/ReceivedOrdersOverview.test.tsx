@@ -45,7 +45,7 @@ describe('received orders overview', () => {
     expect(api.fetchLiveOrdersSummary).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-11-25' }));
     expect(screen.getByText(/2026-11-25.*历史推送记录/)).toBeTruthy();
     await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(1);
+    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(3);
   });
   it.each([
     { status: 'unavailable', basis: 'verified_received_push_events' },
@@ -67,14 +67,15 @@ describe('received orders overview', () => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: false }); fireEvent(document, new Event('visibilitychange')); await flush();
     expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(3);
   });
-  it('reads a historical day once and stops a fixed day after Beijing midnight', async () => {
+  it('revalidates a fixed day after it becomes historical at Beijing midnight', async () => {
     const view = render(<ReceivedOrdersOverview {...props} date="2026-11-24" />); await flush();
     await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(1);
+    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(3);
     view.rerender(<ReceivedOrdersOverview {...props} />); await flush();
     vi.setSystemTime(new Date('2026-11-25T16:01:00Z'));
     await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(2);
+    expect(api.fetchLiveOrdersSummary).toHaveBeenCalledTimes(6);
+    expect(api.fetchLiveOrdersSummary).toHaveBeenLastCalledWith(expect.objectContaining({ date: '2026-11-25' }));
   });
   it('clears and aborts the old scope and rejects its late response', async () => {
     let finish!: (value: LiveOrdersSummary) => void;

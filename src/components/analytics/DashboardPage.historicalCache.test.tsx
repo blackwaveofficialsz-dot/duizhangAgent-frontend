@@ -62,5 +62,5 @@ it('revalidates a cached missing historical store chart after publication in the
   expect(new URL(selectedStoreReads()[1][0], 'http://localhost').searchParams.get('refresh')).toBe('false');
   const count = selectedStoreReads().length;
   await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-  expect(selectedStoreReads()).toHaveLength(count);
+  expect(selectedStoreReads()).toHaveLength(count + 2);
 });

@@ -2265,7 +2265,7 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const today = beijingTodayYmd();
   const realtimeRange = (granularity === "day" || includeCurrent)
     && (relativeRangeRef.current !== null || (dateFrom <= today && dateTo >= today));
-  const pollingInterval = !permissionDenied && realtimeRange && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 300000 : null;
+  const pollingInterval = !permissionDenied && (scopeKeys.includes("ALL") || shopKeys.length > 0) ? 300000 : null;
   usePolling(async signal => {
     const nextToday = beijingTodayYmd();
     if (relativeRangeRef.current && rangeDayRef.current !== nextToday) {
@@ -2512,10 +2512,10 @@ export function DashboardPage({ show }: { show: (m: string) => void }) {
   const freshness = comparisonOverview?.freshness;
   return (
     <div className="space-y-4">
-      {realtimeRange ? <div role="status" className="text-xs text-slate-500">
+      {realtimeRange || freshness ? <div role="status" className="text-xs text-slate-500">
         经营汇总快照 · 每5分钟自动更新
         {freshness?.data_as_of ? ` · 数据截至 ${formatBeijingTime(freshness.data_as_of, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}
-        {refreshFailed ? " · 更新失败，保留上次数据" : freshness?.status === "unavailable" ? " · 今日数据尚未就绪，等待发布" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
+        {refreshFailed ? " · 更新失败，保留上次数据" : freshness?.status === "repairing" ? " · 历史数据核对中" : freshness?.status === "unavailable" ? freshness.mode === "historical" ? " · 当前范围数据尚未就绪，等待发布" : " · 今日数据尚未就绪，等待发布" : freshness?.status === "updating" ? " · 汇总更新中" : ""}
       </div> : null}
       <ReceivedOrdersOverview date={dateTo} storeKeys={scopeKeys.includes("ALL") ? [] : shopKeys} enabled={scopeKeys.includes("ALL") || shopKeys.length > 0} />
       <div className="rounded-lg border border-slate-200 bg-white p-4 md:p-5">

@@ -105,7 +105,7 @@ export type OperationsOverview = {
     snapshot_version: string | null;
     data_as_of: string | null;
     generated_at: string;
-    status: 'current' | 'updating' | 'unavailable';
+    status: 'current' | 'updating' | 'repairing' | 'unavailable';
     refresh_interval_seconds: number;
   };
 };

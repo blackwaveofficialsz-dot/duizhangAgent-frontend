@@ -16,7 +16,7 @@ import { useEmployeeStore } from '../../store/employeeStore';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { usePolling } from '../../hooks/usePolling';
 import { ReceivedOrdersOverview } from './ReceivedOrdersOverview';
-import { currentBeijingDate } from '../../utils/time';
+import { currentBeijingDate, formatBeijingTime } from '../../utils/time';
 import { EmployeeMultiSelect } from '../EmployeeMultiSelect';
 import {
   TableDisplayFrame,
@@ -512,7 +512,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       }
       await Promise.all([
         load(false, false, false, signal),
-        !repairing && includeCurrent
+        !repairing
           ? getOrderDailyFacts<OrderDailyFact>(comparisonRange[0], comparisonRange[1], {}, { signal, forceRefresh: false })
             .then(records => {
               if (!signal.aborted && !accessRevokedRef.current) setOrderFacts(records.map(orderFactFromRecord));
@@ -521,7 +521,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
           : Promise.resolve(),
       ]);
     },
-    permissionDenied ? null : repairing ? 5000 : includeCurrent ? 300000 : null,
+    permissionDenied ? null : 300000,
     [gran, period, dim, excludeToday, comparisonMode, comparisonRange, secondaryDimension, includeCurrent],
   );
   useEffect(() => {
@@ -715,6 +715,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   );
 
   if (permissionDenied) return <div role="alert">暂无权限查看经营数据</div>;
+  const freshness = comparisonOverview?.freshness;
   return (
     <div className="space-y-4">
     <ReceivedOrdersOverview date={comparisonRange[1]} storeKeys={[]} enabled />
@@ -731,6 +732,10 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       </div>
       {periodDescription && <p className="mb-3 text-xs text-slate-400">{periodDescription}</p>}
       {includeCurrent && <p className="mb-3 text-xs text-slate-400">今日经营指标以已发布订单快照为准</p>}
+      {freshness?.status === 'repairing' && <p role="status" className="mb-3 text-xs text-slate-500">
+        历史数据核对中
+        {freshness.data_as_of ? ` · 数据截至 ${formatBeijingTime(freshness.data_as_of, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}
+      </p>}
       <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <PeriodMetricCard
           label="营业额"
@@ -897,6 +902,7 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
       open={Boolean(detailStore)}
       store={detailStore}
       initialGranularity={gran as 'day' | 'week' | 'month'}
+      initialRange={{ dateFrom: comparisonRange[0], dateTo: comparisonRange[1], includeCurrent }}
       secondaryDimension={secondaryDimension}
       breakdowns={breakdownKeys.map(key => ({ key, label: breakdownLabel(key) }))}
       seedFacts={orderFacts}

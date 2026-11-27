@@ -170,7 +170,7 @@ describe('OrdersSection timer lifecycle', () => {
 
     const activeCall = [...pollingHook.usePolling.mock.calls]
       .reverse()
-      .find(([, interval]) => interval === 5000);
+      .find(([, interval, dependencies]) => interval === 300000 && dependencies?.length);
     expect(activeCall).toBeDefined();
     const poll = activeCall?.[0] as (signal: AbortSignal) => Promise<void>;
     const controller = new AbortController();
@@ -303,7 +303,7 @@ describe('OrdersSection timer lifecycle', () => {
 
     expect(screen.getByText('已发现快照不完整，等待后台修复')).toBeTruthy();
     expect(screen.getByText('12%')).toBeTruthy();
-    expect(pollingHook.usePolling.mock.calls.some(([, interval]) => interval === 5000)).toBe(true);
+    expect(pollingHook.usePolling.mock.calls.some(([, interval]) => interval === 300000)).toBe(true);
   });
 
   it('uses force refresh only for the explicit refresh request', async () => {

@@ -576,6 +576,22 @@ describe('DashboardPage realtime refresh', () => {
     expect(screen.queryByText(/更新失败，保留上次数据/)).toBeNull();
   });
 
+  it('keeps historical repair status visible when the selected range excludes today', async () => {
+    const base = await defaultOverviewRequest();
+    operationsApi.fetchOperationsOverview.mockResolvedValue({ ...base, freshness: {
+      mode: 'historical', provisional: true, status: 'repairing', snapshot_version: 'v1',
+      data_as_of: '2026-08-09T04:34:56Z', generated_at: '2026-08-12T12:00:00+08:00', refresh_interval_seconds: 300,
+    } });
+    render(createElement(DashboardPage, { show: vi.fn() }));
+    await screen.findByText('¥1,000.00');
+    fireEvent.click(screen.getAllByText('周')[0]);
+    await waitFor(() => expect((screen.getAllByRole('checkbox')[0] as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenLastCalledWith(expect.objectContaining({ filters: expect.objectContaining({ includeCurrent: false }) })));
+    expect(screen.getByText(/历史数据核对中/).textContent).toContain('12:34:56');
+    expect(screen.getByText('¥1,000.00')).toBeTruthy();
+  });
+
   it('retains published cards and reports a real request failure during refresh', async () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
     await screen.findByText('¥1,000.00');
@@ -797,7 +813,7 @@ describe('DashboardPage realtime refresh', () => {
     expect(operationsApi.fetchOperationsOverview.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it('stops polling and preserves the selected historical range across midnight when excluding the current week', async () => {
+  it('revalidates the selected historical range across midnight when excluding the current week', async () => {
     vi.setSystemTime(new Date('2026-08-12T15:58:00Z'));
     render(createElement(DashboardPage, { show: vi.fn() }));
     await waitFor(() => expect(analyticsApi.getRevenueTrend).toHaveBeenCalled());
@@ -808,7 +824,7 @@ describe('DashboardPage realtime refresh', () => {
     const count = analyticsApi.getRevenueTrend.mock.calls.length;
     const selectedDates = screen.getAllByRole('textbox').map(input => (input as HTMLInputElement).value);
     await act(async () => vi.advanceTimersByTimeAsync(600000));
-    expect(analyticsApi.getRevenueTrend).toHaveBeenCalledTimes(count);
+    expect(analyticsApi.getRevenueTrend.mock.calls.length).toBeGreaterThan(count);
     expect(screen.getAllByRole('textbox').map(input => (input as HTMLInputElement).value)).toEqual(selectedDates);
   });
 
