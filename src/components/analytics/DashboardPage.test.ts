@@ -543,26 +543,37 @@ describe('DashboardPage realtime refresh', () => {
     vi.setSystemTime(new Date('2026-08-12T04:00:00Z'));
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
   });
-  it('consumes the received summary when published order metrics are missing', async () => {
+  it('keeps missing published metrics unavailable without substituting received amounts', async () => {
     const base = await defaultOverviewRequest();
     operationsApi.fetchOperationsOverview.mockResolvedValue({ ...base, metrics: Object.fromEntries(Object.keys(base.metrics).map(key => [key, { current: null }])) });
     render(createElement(DashboardPage, { show: vi.fn() }));
-    expect(await screen.findByText('¥90.1200')).toBeTruthy();
-    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-08-12', storeKeys: [] }));
+    const summary = await screen.findByTestId('dashboard-period-summary');
+    await waitFor(() => expect(operationsApi.fetchOperationsOverview).toHaveBeenCalled());
+    expect(within(summary).getAllByText('—')).toHaveLength(4);
+    expect(screen.queryByRole('region', { name: '已接收订单概览' })).toBeNull();
+    expect(screen.queryByText('¥90.1200')).toBeNull();
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
-  it('does not block received orders behind a pending formal summary', async () => {
+  it('does not introduce a second set of metrics while the published overview is pending', async () => {
     operationsApi.fetchOperationsOverview.mockReturnValue(new Promise(() => {}));
     render(createElement(DashboardPage, { show: vi.fn() }));
-    expect(await screen.findByText('¥90.1200')).toBeTruthy();
+    const summary = await screen.findByTestId('dashboard-period-summary');
+    expect(within(summary).getAllByText('—')).toHaveLength(4);
+    expect(screen.queryByRole('region', { name: '已接收订单概览' })).toBeNull();
+    expect(screen.queryByText('已收订单实付净额')).toBeNull();
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
-  it('keeps published history available when only the received query is forbidden', async () => {
-    liveApi.fetchLiveOrdersSummary.mockRejectedValueOnce(Object.assign(new Error('analytics_scope_denied'), { status: 403 }));
+  it('shows the original four metrics from the published overview without a received summary', async () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
-    expect(await screen.findByText('暂无权限查看已接收订单')).toBeTruthy();
     expect(await screen.findByText('¥1,000.00')).toBeTruthy();
-    expect(screen.queryByText('无权访问经营数据')).toBeNull();
-    await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
-    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledTimes(1);
+    const summary = screen.getByTestId('dashboard-period-summary');
+    expect(within(summary).getByText('¥1,200.00')).toBeTruthy();
+    expect(within(summary).getByText('¥1,000.00')).toBeTruthy();
+    expect(within(summary).getByText('100')).toBeTruthy();
+    expect(within(summary).getByText('¥12.00')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '已接收订单概览' })).toBeNull();
+    expect(screen.queryByText('已收订单实付净额')).toBeNull();
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
 
   it('shows successful unavailable publication as waiting rather than a failed request', async () => {
@@ -968,7 +979,6 @@ describe('DashboardPage meal metric switch', () => {
     render(createElement(DashboardPage, { show: vi.fn() }));
 
     await chooseScope('门店A');
-    await waitFor(() => expect(liveApi.fetchLiveOrdersSummary).toHaveBeenLastCalledWith(expect.objectContaining({ storeKeys: ['801'] })));
     const sourceButtons = await screen.findAllByText('堂食/外卖');
     fireEvent.click(sourceButtons[sourceButtons.length - 1]);
 

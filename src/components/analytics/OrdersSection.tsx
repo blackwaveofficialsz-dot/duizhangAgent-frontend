@@ -15,7 +15,6 @@ import { useChannelStore } from '../../store/channelStore';
 import { useEmployeeStore } from '../../store/employeeStore';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { usePolling } from '../../hooks/usePolling';
-import { ReceivedOrdersOverview } from './ReceivedOrdersOverview';
 import { currentBeijingDate, formatBeijingTime } from '../../utils/time';
 import { EmployeeMultiSelect } from '../EmployeeMultiSelect';
 import {
@@ -718,7 +717,6 @@ export function OrdersSection({ show, canManage }: { show: (m: string) => void; 
   const freshness = comparisonOverview?.freshness;
   return (
     <div className="space-y-4">
-    <ReceivedOrdersOverview date={comparisonRange[1]} storeKeys={[]} enabled />
     <Card>
       <MobileInlineFilter
         summary={`${dimText} · ${periodText}`}

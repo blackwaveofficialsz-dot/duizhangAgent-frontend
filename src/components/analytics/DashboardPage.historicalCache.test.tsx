@@ -7,7 +7,6 @@ const network = vi.hoisted(() => ({ fetch: vi.fn() }));
 const charts = vi.hoisted(() => new Map<HTMLElement, { series: Array<{ data: Array<number | null> }> }>());
 vi.mock('../../api/client', () => ({ apiFetch: network.fetch }));
 vi.mock('../../api/analyticsDailyFacts', () => ({ getOrderDailyFacts: vi.fn().mockRejectedValue(new Error('unsupported')), getMealDailyFacts: vi.fn().mockRejectedValue(new Error('unsupported')) }));
-vi.mock('./ReceivedOrdersOverview', () => ({ ReceivedOrdersOverview: () => null }));
 vi.mock('./TrendPeriodControls', () => ({ TrendPeriodControls: ({ onRangeChange }: { onRangeChange: (from: string, to: string) => void }) => <button onClick={() => onRangeChange('2026-11-25', '2026-11-25')}>查看25日</button> }));
 vi.mock('./StoreScopePicker', () => ({ StoreScopePicker: ({ onChange }: { onChange: (keys: string[]) => void }) => <button onClick={() => onChange(['shop:801'])}>选择门店801</button> }));
 vi.mock('../../features/operations-analysis/api/client', () => ({ fetchOperationsOverview: vi.fn().mockResolvedValue({ period: { date_from: '2026-11-25', date_to: '2026-11-25' }, metrics: {}, channels: [], stores: [], completeness: { status: 'missing' } }) }));

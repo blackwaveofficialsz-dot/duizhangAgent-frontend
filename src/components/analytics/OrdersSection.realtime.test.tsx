@@ -36,19 +36,33 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('OrdersSection realtime orders', () => {
-  it('consumes received orders while the published summary is missing', async () => {
+  it('keeps missing published metrics unavailable without substituting received amounts', async () => {
     const missing = overview();
     Object.values(missing.metrics).forEach(metric => { Object.assign(metric, { current: null }); });
     missing.sections.orders.status = 'missing'; missing.completeness.status = 'missing';
     overviewApi.fetchOperationsOverview.mockResolvedValue(missing);
     render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
-    expect(screen.getByText('¥88.1200')).toBeTruthy();
-    expect(liveApi.fetchLiveOrdersSummary).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-08-12', storeKeys: [] }));
+    expect(screen.queryByRole('region', { name: '已接收订单概览' })).toBeNull();
+    expect(screen.queryByText('¥88.1200')).toBeNull();
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(4);
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
-  it('does not wait for a slow formal summary before showing received orders', async () => {
-    overviewApi.fetchOperationsOverview.mockReturnValue(new Promise(() => {}));
+  it('shows the original four metrics and store detail from the same published overview', async () => {
     render(<OrdersSection show={vi.fn()} canManage={false} />); await flush();
-    expect(screen.getByText('¥88.1200')).toBeTruthy();
+    const card = (label: string) => screen.getAllByText(label)
+      .find(element => element.parentElement?.classList.contains('bg-slate-50'))!.parentElement!;
+    expect(within(card('营业额')).getByText('¥60.00')).toBeTruthy();
+    expect(within(card('净实收')).getByText('¥50.00')).toBeTruthy();
+    expect(within(card('订单数')).getByText('5')).toBeTruthy();
+    expect(within(card('客单价')).getByText('¥10.00')).toBeTruthy();
+    const storeRow = screen.getAllByRole('button', { name: '实时测试店' })[0].closest('tr')!;
+    expect(within(storeRow).getByText('¥60.00')).toBeTruthy();
+    expect(within(storeRow).getByText('¥50.00')).toBeTruthy();
+    expect(within(storeRow).getByText('5')).toBeTruthy();
+    expect(within(storeRow).getByText('¥10.00')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '已接收订单概览' })).toBeNull();
+    expect(screen.queryByText('已收订单实付净额')).toBeNull();
+    expect(liveApi.fetchLiveOrdersSummary).not.toHaveBeenCalled();
   });
   it('opens today and explicitly includes current orders', async () => {
     render(<OrdersSection show={vi.fn()} canManage={false} />);
